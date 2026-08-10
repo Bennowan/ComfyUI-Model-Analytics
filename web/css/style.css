@@ -1,0 +1,173 @@
+.ma-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ma-modal {
+  width: 88vw;
+  max-width: 1100px;
+  height: 82vh;
+  background: #1b1d23;
+  border: 1px solid #33363f;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  color: #e6e6e6;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.ma-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #2c2f38;
+  background: #202329;
+}
+
+.ma-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.ma-close-btn {
+  background: transparent;
+  border: none;
+  color: #9a9da5;
+  font-size: 20px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.ma-close-btn:hover {
+  background: #2c2f38;
+  color: #fff;
+}
+
+.ma-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 14px 0 14px;
+  border-bottom: 1px solid #2c2f38;
+  background: #1e2128;
+}
+
+.ma-tab-btn {
+  background: transparent;
+  border: none;
+  color: #9a9da5;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 6px 6px 0 0;
+}
+.ma-tab-btn:hover {
+  color: #fff;
+  background: #262a32;
+}
+.ma-tab-btn.active {
+  color: #fff;
+  background: #2c2f38;
+  border-bottom: 2px solid #5b8cff;
+}
+
+.ma-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px;
+}
+
+.ma-summary {
+  font-size: 12px;
+  color: #9a9da5;
+  margin-bottom: 10px;
+}
+
+.ma-summary b {
+  color: #e6e6e6;
+}
+
+table.ma-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+table.ma-table th, table.ma-table td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid #262a32;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+table.ma-table th {
+  color: #9a9da5;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  position: sticky;
+  top: 0;
+  background: #1b1d23;
+}
+table.ma-table th:hover {
+  color: #fff;
+}
+table.ma-table th .ma-sort-arrow {
+  opacity: 0.5;
+  margin-left: 4px;
+}
+
+table.ma-table tbody tr:hover {
+  background: #23262e;
+}
+
+.ma-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: #2c2f38;
+  color: #9a9da5;
+}
+.ma-badge.ma-badge-unused {
+  background: #3a2a2a;
+  color: #ff9d9d;
+}
+.ma-badge.ma-badge-used {
+  background: #24352a;
+  color: #8ee6a8;
+}
+
+.ma-empty-state {
+  color: #6b6e76;
+  font-size: 13px;
+  padding: 30px 0;
+  text-align: center;
+}
+
+.ma-select {
+  background: #23262e;
+  color: #e6e6e6;
+  border: 1px solid #33363f;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  margin-bottom: 12px;
+}
+
+.ma-menu-btn {
+  cursor: pointer;
+}
