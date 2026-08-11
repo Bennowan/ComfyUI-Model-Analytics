@@ -1,12 +1,26 @@
 import { app } from "../../../scripts/app.js";
 
-const CSS_HREF = new URL("../css/style.css", import.meta.url).href;
+// Bump this whenever main.js/style.css change, so the injected <link> tag
+// gets a fresh URL and browsers can't serve a stale cached copy of the CSS.
+// (main.js itself is loaded by ComfyUI's own extension loader - if you
+// don't see JS changes after an update, hard-refresh the browser tab,
+// e.g. Ctrl+Shift+R / Cmd+Shift+R, or disable cache in devtools.)
+const EXT_VERSION = "2";
+
+const CSS_HREF = `${new URL("../css/style.css", import.meta.url).href}?v=${EXT_VERSION}`;
 
 function injectCss() {
-  if (document.querySelector(`link[href="${CSS_HREF}"]`)) return;
+  const existing = document.querySelector('link[data-ma-style="1"]');
+  if (existing) {
+    if (existing.getAttribute("href") !== CSS_HREF) {
+      existing.setAttribute("href", CSS_HREF);
+    }
+    return;
+  }
   const link = document.createElement("link");
   link.rel = "stylesheet";
   link.href = CSS_HREF;
+  link.dataset.maStyle = "1";
   document.head.appendChild(link);
 }
 
@@ -35,10 +49,11 @@ function formatDate(iso) {
 class ModelAnalyticsDashboard {
   constructor() {
     this.data = null;
-    this.activeTab = "active";
-    this.sortState = { active: { col: "last_used", dir: -1 }, unused: { col: "size_bytes", dir: -1 } };
+    this.activeTab = "used";
+    this.sortState = { used: { col: "last_used", dir: -1 }, unused: { col: "size_bytes", dir: -1 } };
     this.selectedWorkflow = null;
     this.overlay = null;
+    this.usedThresholdDays = 7;
   }
 
   async open() {
@@ -65,15 +80,22 @@ class ModelAnalyticsDashboard {
       <div class="ma-modal">
         <div class="ma-header">
           <h2>📊 Model Analytics Dashboard</h2>
-          <button class="ma-close-btn" title="Close">✕</button>
+          <div class="ma-header-right">
+            <label class="ma-stale-control" title="A model counts as Used if it was loaded within this many days. Older or never-loaded models fall back to Unused automatically.">
+              Used within last
+              <input type="number" class="ma-stale-input" min="0" step="1" value="${this.usedThresholdDays}" />
+              days
+            </label>
+            <button class="ma-close-btn" title="Close">✕</button>
+          </div>
         </div>
         <div class="ma-tabs">
-          <button class="ma-tab-btn" data-tab="active">Aktive Modelle</button>
-          <button class="ma-tab-btn" data-tab="unused">Ungenutzte Modelle</button>
-          <button class="ma-tab-btn" data-tab="workflow">Workflow-Sicht</button>
+          <button class="ma-tab-btn" data-tab="used">Used Models</button>
+          <button class="ma-tab-btn" data-tab="unused">Unused Models</button>
+          <button class="ma-tab-btn" data-tab="workflow">Workflow View</button>
         </div>
         <div class="ma-body">
-          <div class="ma-summary">Lade Daten…</div>
+          <div class="ma-summary">Loading data…</div>
         </div>
       </div>
     `;
@@ -86,19 +108,33 @@ class ModelAnalyticsDashboard {
       });
     });
 
+    const staleInput = overlay.querySelector(".ma-stale-input");
+    staleInput.addEventListener("change", async () => {
+      const val = parseFloat(staleInput.value);
+      if (!isNaN(val) && val >= 0) {
+        this.usedThresholdDays = val;
+        const body = overlay.querySelector(".ma-body");
+        body.innerHTML = `<div class="ma-summary">Loading data…</div>`;
+        await this.refresh();
+      }
+    });
+
     document.body.appendChild(overlay);
     this.overlay = overlay;
   }
 
   async refresh() {
     try {
-      const res = await fetch("/model_analytics/inventory");
+      const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(this.usedThresholdDays)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this.data = await res.json();
+      if (typeof this.data.used_threshold_days === "number") {
+        this.usedThresholdDays = this.data.used_threshold_days;
+      }
     } catch (e) {
       const body = this.overlay?.querySelector(".ma-body");
       if (body) {
-        body.innerHTML = `<div class="ma-empty-state">Fehler beim Laden der Daten: ${e.message}</div>`;
+        body.innerHTML = `<div class="ma-empty-state">Error loading data: ${e.message}</div>`;
       }
       return;
     }
@@ -113,12 +149,12 @@ class ModelAnalyticsDashboard {
 
     const body = this.overlay.querySelector(".ma-body");
     if (!this.data) {
-      body.innerHTML = `<div class="ma-empty-state">Keine Daten verfügbar.</div>`;
+      body.innerHTML = `<div class="ma-empty-state">No data available.</div>`;
       return;
     }
 
-    if (this.activeTab === "active") {
-      body.innerHTML = this.renderActiveTab();
+    if (this.activeTab === "used") {
+      body.innerHTML = this.renderUsedTab();
     } else if (this.activeTab === "unused") {
       body.innerHTML = this.renderUnusedTab();
     } else {
@@ -143,39 +179,41 @@ class ModelAnalyticsDashboard {
     });
   }
 
-  renderActiveTab() {
-    const active = this.data.models.filter((m) => !m.unused);
-    const state = this.sortState.active;
-    const sorted = this.sortRows(active, state.col, state.dir);
+  renderUsedTab() {
+    const used = this.data.models.filter((m) => !m.unused);
+    const state = this.sortState.used;
+    const sorted = this.sortRows(used, state.col, state.dir);
 
     if (!sorted.length) {
-      return `<div class="ma-empty-state">Keine aktiven Modelle gefunden – weder in Workflows referenziert noch im Live-Tracking erfasst.</div>`;
+      return `<div class="ma-empty-state">No models used within the last ${this.usedThresholdDays} day(s).</div>`;
     }
 
     return `
-      <div class="ma-summary"><b>${active.length}</b> aktive Modelle von <b>${this.data.total_models}</b> insgesamt.</div>
-      <table class="ma-table" data-table="active">
-        <thead>
-          <tr>
-            ${this.headerCell("Name", "rel_path", "active")}
-            ${this.headerCell("Größe", "size_bytes", "active")}
-            ${this.headerCell("Workflows", "workflows", "active")}
-            ${this.headerCell("Nutzungen", "use_count", "active")}
-            ${this.headerCell("Zuletzt verwendet", "last_used", "active")}
-          </tr>
-        </thead>
-        <tbody>
-          ${sorted.map((m) => `
+      <div class="ma-summary"><b>${used.length}</b> used models out of <b>${this.data.total_models}</b> total (loaded within the last ${this.usedThresholdDays} day(s)).</div>
+      <div class="ma-table-scroll">
+        <table class="ma-table" data-table="used">
+          <thead>
             <tr>
-              <td title="${m.rel_path}">${m.rel_path}</td>
-              <td>${formatBytes(m.size_bytes)}</td>
-              <td title="${m.workflows.join(', ')}">${m.workflows.length ? m.workflows.join(", ") : "—"}</td>
-              <td>${m.use_count}</td>
-              <td>${formatDate(m.last_used)}</td>
+              ${this.headerCell("Name", "rel_path", "used")}
+              ${this.headerCell("Size", "size_bytes", "used")}
+              ${this.headerCell("Workflows", "workflows", "used")}
+              ${this.headerCell("Uses", "use_count", "used")}
+              ${this.headerCell("Last Used", "last_used", "used")}
             </tr>
-          `).join("")}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            ${sorted.map((m) => `
+              <tr>
+                <td title="${m.rel_path}">${m.rel_path}</td>
+                <td>${formatBytes(m.size_bytes)}</td>
+                <td title="${m.workflows.join(', ')}">${m.workflows.length ? m.workflows.join(", ") : "—"}</td>
+                <td>${m.use_count}</td>
+                <td>${formatDate(m.last_used)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
     `;
   }
 
@@ -186,36 +224,40 @@ class ModelAnalyticsDashboard {
     const totalBytes = this.data.total_unused_bytes;
 
     if (!sorted.length) {
-      return `<div class="ma-empty-state">Keine ungenutzten Modelle gefunden. 🎉</div>`;
+      return `<div class="ma-empty-state">No unused models found. 🎉</div>`;
     }
 
     return `
-      <div class="ma-summary"><b>${unused.length}</b> ungenutzte Modelle, zusammen <b>${formatBytes(totalBytes)}</b> Speicherplatz.</div>
-      <table class="ma-table" data-table="unused">
-        <thead>
-          <tr>
-            ${this.headerCell("Name", "rel_path", "unused")}
-            ${this.headerCell("Kategorie", "kind", "unused")}
-            ${this.headerCell("Größe", "size_bytes", "unused")}
-          </tr>
-        </thead>
-        <tbody>
-          ${sorted.map((m) => `
+      <div class="ma-summary"><b>${unused.length}</b> unused models, totalling <b>${formatBytes(totalBytes)}</b> of disk space. A model lands here if it has never been used, or wasn't used within the last ${this.usedThresholdDays} day(s).</div>
+      <div class="ma-table-scroll">
+        <table class="ma-table" data-table="unused">
+          <thead>
             <tr>
-              <td title="${m.rel_path}">${m.rel_path}</td>
-              <td><span class="ma-badge">${m.kind}</span></td>
-              <td>${formatBytes(m.size_bytes)}</td>
+              ${this.headerCell("Name", "rel_path", "unused")}
+              ${this.headerCell("Category", "kind", "unused")}
+              ${this.headerCell("Size", "size_bytes", "unused")}
+              ${this.headerCell("Last Used", "last_used", "unused")}
             </tr>
-          `).join("")}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            ${sorted.map((m) => `
+              <tr>
+                <td title="${m.rel_path}">${m.rel_path}</td>
+                <td><span class="ma-badge">${m.kind}</span></td>
+                <td>${formatBytes(m.size_bytes)}</td>
+                <td>${formatDate(m.last_used)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
     `;
   }
 
   renderWorkflowTab() {
     const names = this.data.workflow_names || [];
     if (!names.length) {
-      return `<div class="ma-empty-state">Keine gespeicherten Workflows gefunden.</div>`;
+      return `<div class="ma-empty-state">No saved workflows found.<br><span style="font-size:11px;">Save a workflow in ComfyUI (Workflow → Save) and it will show up here.</span></div>`;
     }
     if (!this.selectedWorkflow || !names.includes(this.selectedWorkflow)) {
       this.selectedWorkflow = names[0];
@@ -230,22 +272,24 @@ class ModelAnalyticsDashboard {
         ${names.map((n) => `<option value="${n}" ${n === this.selectedWorkflow ? "selected" : ""}>${n}</option>`).join("")}
       </select>
       ${modelsInWorkflow.length ? `
-        <table class="ma-table">
-          <thead>
-            <tr><th>Name</th><th>Kategorie</th><th>Größe</th><th>Status</th></tr>
-          </thead>
-          <tbody>
-            ${modelsInWorkflow.map((m) => `
-              <tr>
-                <td title="${m.rel_path}">${m.rel_path}</td>
-                <td><span class="ma-badge">${m.kind}</span></td>
-                <td>${formatBytes(m.size_bytes)}</td>
-                <td><span class="ma-badge ma-badge-used">gefunden</span></td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      ` : `<div class="ma-empty-state">Keine der referenzierten Modelldateien wurde auf der Festplatte gefunden.</div>`}
+        <div class="ma-table-scroll">
+          <table class="ma-table">
+            <thead>
+              <tr><th>Name</th><th>Category</th><th>Size</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              ${modelsInWorkflow.map((m) => `
+                <tr>
+                  <td title="${m.rel_path}">${m.rel_path}</td>
+                  <td><span class="ma-badge">${m.kind}</span></td>
+                  <td>${formatBytes(m.size_bytes)}</td>
+                  <td><span class="ma-badge ma-badge-used">found</span></td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : `<div class="ma-empty-state">In "${this.selectedWorkflow}" references models that were not found on disk (or this workflow does not reference any model files).</div>`}
     `;
   }
 
