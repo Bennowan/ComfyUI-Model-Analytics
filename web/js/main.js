@@ -355,5 +355,40 @@ app.registerExtension({
         document.body.appendChild(menuButton);
       }
     }
+
+    // Self-cleanup: nothing about this extension is persisted anywhere
+    // (no cookies, no localStorage) - the button only exists because this
+    // script is currently running in the page. If the node gets
+    // uninstalled while the page is still open, the button would
+    // otherwise stay stuck until a hard refresh (Ctrl+F5), since the
+    // browser has already loaded and executed this module. Instead, we
+    // periodically ping our own backend route; once it 404s (route no
+    // longer registered because the node/package is gone), we remove the
+    // button and stop polling - no reload required, nothing to leave
+    // behind either way.
+    let missingCount = 0;
+    const REQUIRED_MISSING_STREAK = 2; // avoid a single transient network blip removing the button
+    const healthCheckInterval = setInterval(async () => {
+      try {
+        const res = await fetch("/model_analytics/inventory", { method: "HEAD" });
+        if (res.status === 404) {
+          missingCount++;
+        } else {
+          missingCount = 0;
+        }
+      } catch {
+        // Network hiccup or server restarting - don't count this as
+        // "uninstalled", just skip this check.
+        return;
+      }
+
+      if (missingCount >= REQUIRED_MISSING_STREAK) {
+        clearInterval(healthCheckInterval);
+        dashboard.close();
+        menuButton.remove();
+        const styleLink = document.querySelector('link[data-ma-style="1"]');
+        if (styleLink) styleLink.remove();
+      }
+    }, 30000);
   },
 });
