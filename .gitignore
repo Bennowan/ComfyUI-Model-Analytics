@@ -1,3 +1,15 @@
 __pycache__/
 *.pyc
+*.pyo
+
 model_history.json
+
+.ruff_cache/
+
+*.zip
+
+.vscode/
+.idea/
+
+Thumbs.db
+.DS_Store
