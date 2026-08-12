@@ -77,7 +77,11 @@ def _parse_last_used(last_used: Optional[str]) -> Optional[datetime]:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
-    except ValueError:
+    except (ValueError, TypeError):
+        # ValueError: malformed ISO string. TypeError: last_used wasn't a
+        # string at all (e.g. a legacy/corrupt history entry stored a
+        # number or null) - fromisoformat() raises TypeError for that,
+        # not ValueError, so both must be caught to avoid a crash.
         log.debug("Could not parse last_used timestamp: %r", last_used)
         return None
 
@@ -102,7 +106,15 @@ def is_recently_used(last_used: Optional[str], threshold_days: Optional[float] =
 def _history_path() -> str:
     if folder_paths is None:
         return os.path.join(os.getcwd(), "model_history.json")
-    return os.path.join(folder_paths.get_user_directory(), "model_history.json")
+    try:
+        return os.path.join(folder_paths.get_user_directory(), "model_history.json")
+    except Exception as e:
+        # Some ComfyUI forks/configurations could raise here (e.g. a
+        # misconfigured or missing user directory setting). Fall back to
+        # the current working directory rather than letting this crash
+        # every call site that needs the history path.
+        log.warning("Could not resolve ComfyUI user directory, falling back to cwd: %s", e)
+        return os.path.join(os.getcwd(), "model_history.json")
 
 
 def _load_history() -> Dict[str, Any]:
@@ -135,7 +147,20 @@ def _load_history() -> Dict[str, Any]:
     if current_mtime is not None:
         try:
             with open(path, "r", encoding="utf-8") as f:
-                _history_cache = json.load(f)
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                # Valid JSON but the wrong shape (e.g. "[]", "null", or a
+                # bare string) - can happen from a manual edit or a
+                # corrupted write. json.JSONDecodeError doesn't catch
+                # this since the JSON itself parses fine; without this
+                # check, _migrate_history_entries()'s history.items()
+                # would raise AttributeError and take down every request.
+                log.warning(
+                    "model_history.json did not contain a JSON object (got %s) - starting fresh",
+                    type(loaded).__name__,
+                )
+                loaded = {}
+            _history_cache = loaded
         except (OSError, json.JSONDecodeError) as e:
             log.warning("Could not read model_history.json, starting fresh: %s", e)
             _history_cache = {}

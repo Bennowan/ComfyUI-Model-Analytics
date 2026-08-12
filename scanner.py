@@ -156,6 +156,45 @@ def _get_model_root_dirs() -> Dict[str, List[Path]]:
     return roots
 
 
+def _safe_is_dir(path: Path) -> bool:
+    """path.is_dir() can itself raise OSError on some broken junctions /
+    inaccessible network paths on Windows, instead of just returning
+    False like it does for a normal missing directory. Never let that
+    kill the whole scan."""
+    try:
+        return path.is_dir()
+    except OSError as e:
+        log.warning("Could not check directory %s: %s", path, e)
+        return False
+
+
+def _iter_dir_files_safely(root_dir: Path):
+    """
+    Wraps root_dir.rglob("*") defensively.
+
+    rglob() returns a generator, and on Windows in particular it's
+    realistic for iterating it to raise OSError/PermissionError partway
+    through - e.g. a broken junction/symlink, a network drive that
+    disconnects mid-scan, a cloud-sync placeholder file (OneDrive/Google
+    Drive "online-only" stubs), or a path exceeding MAX_PATH. Without this
+    wrapper, a single such entry anywhere under any model root aborts the
+    *entire* inventory request with a 500, even though every other file
+    scanned fine. We catch mid-iteration failures and stop walking just
+    that root directory, while still returning everything found before
+    the failure and letting the other model-kind roots scan normally.
+    """
+    try:
+        iterator = root_dir.rglob("*")
+        while True:
+            try:
+                yield next(iterator)
+            except StopIteration:
+                return
+    except OSError as e:
+        log.warning("Stopped scanning %s after an OS error: %s", root_dir, e)
+        return
+
+
 def scan_disk_models() -> List[Dict[str, Any]]:
     """
     Physical inventory: walks every known model directory and returns
@@ -164,6 +203,14 @@ def scan_disk_models() -> List[Dict[str, Any]]:
     rel_path is relative to its own model-kind root, and preserves nested
     subfolders (e.g. "chatterbox/chatterbox_multilingual/s3gen.pt") so that
     same-named files in different subfolders are never conflated.
+
+    Defensive by design: every filesystem call in this function can fail
+    independently on a real user's machine (permission errors, broken
+    symlinks/junctions, disconnected network drives, races where a file
+    disappears between being listed and being stat'ed). Each failure is
+    caught at the narrowest possible scope and logged, so one bad file or
+    directory degrades the result (that entry is skipped) instead of
+    failing the entire /model_analytics/inventory request.
     """
     results: List[Dict[str, Any]] = []
     roots = _get_model_root_dirs()
@@ -176,10 +223,17 @@ def scan_disk_models() -> List[Dict[str, Any]]:
 
     for kind, dirs in roots.items():
         for root_dir in dirs:
-            if not root_dir.is_dir():
+            if not _safe_is_dir(root_dir):
                 continue
-            for path in root_dir.rglob("*"):
-                if not path.is_file():
+            for path in _iter_dir_files_safely(root_dir):
+                try:
+                    is_file = path.is_file()
+                except OSError as e:
+                    # Broken symlink/junction, or a race where the entry
+                    # vanished between being listed and being checked.
+                    log.debug("Could not check file type for %s: %s", path, e)
+                    continue
+                if not is_file:
                     continue
 
                 classification = _classify_model_file(path.name)
@@ -192,7 +246,8 @@ def scan_disk_models() -> List[Dict[str, Any]]:
 
                 try:
                     real_path = path.resolve()
-                except OSError:
+                except OSError as e:
+                    log.debug("Could not resolve %s, using unresolved path: %s", path, e)
                     real_path = path
 
                 # Defense-in-depth: even though _get_model_root_dirs()
@@ -207,19 +262,39 @@ def scan_disk_models() -> List[Dict[str, Any]]:
                     continue
                 seen_real_paths.add(real_path)
 
-                rel_path = path.relative_to(root_dir).as_posix()
+                try:
+                    rel_path = path.relative_to(root_dir).as_posix()
+                except ValueError as e:
+                    # Should not normally happen since path came from
+                    # root_dir's own rglob(), but a resolved symlink
+                    # target could in theory land outside root_dir.
+                    log.debug("Could not compute relative path for %s under %s: %s", path, root_dir, e)
+                    continue
+
                 try:
                     size_bytes = path.stat().st_size
                 except OSError as e:
+                    # File disappeared between listing and stat (race),
+                    # or a permission error on the specific file. Still
+                    # include the entry with size 0 rather than dropping
+                    # it entirely - better a slightly-wrong size than a
+                    # missing model.
                     log.warning("Could not stat %s: %s", path, e)
                     size_bytes = 0
-                results.append({
-                    "kind": kind,
-                    "rel_path": rel_path,
-                    "abs_path": str(path),
-                    "size_bytes": size_bytes,
-                    "disabled": classification["disabled"],
-                })
+                try:
+                    results.append({
+                        "kind": kind,
+                        "rel_path": rel_path,
+                        "abs_path": str(path),
+                        "size_bytes": size_bytes,
+                        "disabled": classification["disabled"],
+                    })
+                except Exception as e:
+                    # Last-resort safety net: should be unreachable given
+                    # the checks above, but a single malformed entry must
+                    # never take down the whole scan.
+                    log.warning("Skipping model entry for %s due to unexpected error: %s", path, e)
+                    continue
 
     return results
 
@@ -244,9 +319,20 @@ def _candidate_workflow_dirs() -> List[Path]:
 
 
 def _count_json_files(directory: Path) -> int:
-    if not directory.is_dir():
+    if not _safe_is_dir(directory):
         return 0
-    return sum(1 for p in directory.rglob("*.json") if p.is_file())
+    try:
+        return sum(1 for p in _iter_dir_files_safely(directory) if p.name.lower().endswith(".json") and _safe_is_file(p))
+    except Exception as e:
+        log.debug("Could not count workflow files in %s: %s", directory, e)
+        return 0
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def _get_workflows_dir() -> Path:
@@ -282,12 +368,28 @@ def _iter_model_strings(obj: Any):
 def _iter_workflow_files(workflows_dir: Path):
     """Yield (relative_name, absolute_path) for every workflow JSON file,
     recursing into subfolders (users can organize workflows into folders
-    in the ComfyUI UI)."""
-    if not workflows_dir.is_dir():
+    in the ComfyUI UI).
+
+    Same rglob()-mid-iteration hardening as the model scanner: a broken
+    symlink or inaccessible subfolder inside the workflows directory must
+    not abort workflow discovery entirely."""
+    if not _safe_is_dir(workflows_dir):
         return
-    for path in workflows_dir.rglob("*.json"):
-        if path.is_file():
+    for path in _iter_dir_files_safely(workflows_dir):
+        if not path.name.lower().endswith(".json"):
+            continue
+        try:
+            is_file = path.is_file()
+        except OSError as e:
+            log.debug("Could not check file type for %s: %s", path, e)
+            continue
+        if not is_file:
+            continue
+        try:
             yield path.relative_to(workflows_dir).as_posix(), path
+        except ValueError as e:
+            log.debug("Could not compute relative path for workflow %s: %s", path, e)
+            continue
 
 
 def scan_workflows() -> Dict[str, List[str]]:
@@ -295,6 +397,11 @@ def scan_workflows() -> Dict[str, List[str]]:
     Logical inventory: maps a model filename (as it appears in the
     workflow JSON, e.g. "unet/Wan2.2-I2V.gguf" or just "model.safetensors")
     to the list of workflow filenames that reference it.
+
+    Each workflow file is parsed independently and defensively: a single
+    malformed, truncated, non-UTF8, permission-denied, or otherwise
+    unreadable workflow file is skipped and logged rather than failing
+    the entire dashboard request.
     """
     mapping: Dict[str, List[str]] = {}
     workflows_dir = _get_workflows_dir()
@@ -303,16 +410,34 @@ def scan_workflows() -> Dict[str, List[str]]:
         try:
             with full_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            # OSError: permission denied, file vanished mid-scan, etc.
+            # JSONDecodeError: truncated/corrupt workflow save.
+            # UnicodeDecodeError: file saved in a non-UTF8 encoding
+            # (seen on some Windows setups) or a genuinely binary file
+            # with a .json extension.
             log.warning("Skipping unreadable workflow %s: %s", rel_name, e)
             continue
+        except Exception as e:
+            # Safety net for any other unexpected parse failure - a
+            # single bad workflow file must never take down the whole
+            # inventory endpoint.
+            log.warning("Skipping workflow %s due to unexpected error: %s", rel_name, e)
+            continue
 
-        for model_str in _iter_model_strings(data):
-            # Normalize slashes so "unet\\foo.gguf" and "unet/foo.gguf" match.
-            normalized = model_str.replace("\\", "/")
-            mapping.setdefault(normalized, [])
-            if rel_name not in mapping[normalized]:
-                mapping[normalized].append(rel_name)
+        try:
+            for model_str in _iter_model_strings(data):
+                # Normalize slashes so "unet\\foo.gguf" and "unet/foo.gguf" match.
+                normalized = model_str.replace("\\", "/")
+                mapping.setdefault(normalized, [])
+                if rel_name not in mapping[normalized]:
+                    mapping[normalized].append(rel_name)
+        except Exception as e:
+            # _iter_model_strings recurses through arbitrary user-authored
+            # JSON; guard against unexpected shapes (e.g. extremely deep
+            # nesting hitting Python's recursion limit).
+            log.warning("Skipping model references from workflow %s due to unexpected error: %s", rel_name, e)
+            continue
 
     return mapping
 

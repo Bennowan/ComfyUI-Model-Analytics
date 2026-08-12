@@ -26,10 +26,42 @@ def _build_inventory(threshold_days: float = None) -> dict:
     if threshold_days is None:
         threshold_days = get_used_threshold_days()
 
-    disk_models = scan_disk_models()          # [{kind, rel_path, abs_path, size_bytes}]
-    workflow_map = scan_workflows()            # {rel_path_or_name: [workflow_files]}
-    history = get_history()                    # {rel_path: {use_count, last_used}}
-    workflow_names = list_workflow_names()
+    # Each of these four calls is independently defensive internally
+    # (scanner.py / tracker.py catch and skip per-item failures), but we
+    # additionally isolate them from each other here: if, despite that,
+    # one subsystem still raises (e.g. an unexpected folder_paths error
+    # on a particular ComfyUI fork), the dashboard still returns partial
+    # data for the parts that succeeded instead of a bare 500 with no
+    # models at all.
+    try:
+        disk_models = scan_disk_models()          # [{kind, rel_path, abs_path, size_bytes}]
+    except Exception:
+        log.exception("Disk model scan failed - returning empty model list")
+        disk_models = []
+
+    try:
+        workflow_map = scan_workflows()            # {rel_path_or_name: [workflow_files]}
+    except Exception:
+        log.exception("Workflow scan failed - continuing without workflow references")
+        workflow_map = {}
+
+    try:
+        history = get_history()                    # {rel_path: {use_count, last_used}}
+    except Exception:
+        log.exception("Loading model usage history failed - treating all models as never used")
+        history = {}
+
+    try:
+        workflow_names = list_workflow_names()
+    except Exception:
+        log.exception("Listing workflow names failed")
+        workflow_names = []
+
+    try:
+        workflows_debug = get_workflows_dir_debug_info()
+    except Exception:
+        log.exception("Building workflows debug info failed")
+        workflows_debug = {}
 
     # Build a quick lookup of workflow-referenced names for matching against
     # disk rel_paths. We match on both the full rel_path and just the
@@ -48,49 +80,65 @@ def _build_inventory(threshold_days: float = None) -> dict:
 
     inventory = []
     total_unused_bytes = 0
+    skipped_models = 0
 
     for model in disk_models:
-        rel_path = model["rel_path"]
-        basename = rel_path.split("/")[-1]
+        # Each model is processed independently. An unexpected shape for
+        # one entry (e.g. a stat race leaving size_bytes as None, or a
+        # malformed history entry) must not drop every other model from
+        # the response.
+        try:
+            rel_path = model["rel_path"]
+            basename = rel_path.split("/")[-1]
 
-        referenced_in = workflow_map.get(rel_path) or workflow_keys_by_basename.get(basename, [])
+            referenced_in = workflow_map.get(rel_path) or workflow_keys_by_basename.get(basename, [])
 
-        hist_entry = history.get(rel_path)
-        if hist_entry is None:
-            hist_key = history_keys_by_basename.get(basename)
-            hist_entry = history.get(hist_key) if hist_key else None
+            hist_entry = history.get(rel_path)
+            if hist_entry is None:
+                hist_key = history_keys_by_basename.get(basename)
+                hist_entry = history.get(hist_key) if hist_key else None
 
-        last_used_iso = hist_entry.get("last_used") if hist_entry else None
-        use_count = hist_entry.get("use_count", 0) if hist_entry else 0
+            last_used_iso = hist_entry.get("last_used") if hist_entry else None
+            use_count = hist_entry.get("use_count", 0) if hist_entry else 0
 
-        # Categorization is recalculated fresh every request from the
-        # stored timestamp - never from a persisted "used" flag. A model
-        # never loaded, or not loaded within `threshold_days`, is unused -
-        # regardless of whether it's still referenced by a workflow.
-        recently_used = is_recently_used(last_used_iso, threshold_days)
-        is_unused = not recently_used
+            # Categorization is recalculated fresh every request from the
+            # stored timestamp - never from a persisted "used" flag. A model
+            # never loaded, or not loaded within `threshold_days`, is unused -
+            # regardless of whether it's still referenced by a workflow.
+            recently_used = is_recently_used(last_used_iso, threshold_days)
+            is_unused = not recently_used
 
-        if is_unused:
-            total_unused_bytes += model["size_bytes"]
+            size_bytes = model.get("size_bytes", 0) or 0
+            if is_unused:
+                total_unused_bytes += size_bytes
 
-        inventory.append({
-            "kind": model["kind"],
-            "rel_path": rel_path,
-            "size_bytes": model["size_bytes"],
-            "workflows": sorted(set(referenced_in)),
-            "use_count": use_count,
-            "last_used": last_used_iso,
-            "unused": is_unused,
-        })
+            inventory.append({
+                "kind": model.get("kind", "unknown"),
+                "rel_path": rel_path,
+                "size_bytes": size_bytes,
+                "workflows": sorted(set(referenced_in)),
+                "use_count": use_count,
+                "last_used": last_used_iso,
+                "unused": is_unused,
+            })
+        except Exception:
+            skipped_models += 1
+            log.exception("Skipping one model entry due to an unexpected error while building inventory: %r", model)
+            continue
+
+    if skipped_models:
+        log.warning("Skipped %d model(s) while building inventory due to per-item errors", skipped_models)
 
     return {
+        "success": True,
         "models": inventory,
         "workflow_names": workflow_names,
         "workflow_map": workflow_map,
         "total_unused_bytes": total_unused_bytes,
         "total_models": len(inventory),
         "used_threshold_days": threshold_days,
-        "workflows_debug": get_workflows_dir_debug_info(),
+        "workflows_debug": workflows_debug,
+        "skipped_models": skipped_models,
     }
 
 
@@ -110,8 +158,20 @@ async def get_inventory(request: web.Request) -> web.Response:
         data = _build_inventory(threshold_days=threshold_days)
         return web.json_response(data)
     except Exception as e:
+        # _build_inventory() already isolates and logs its own internal
+        # failures per subsystem/per-model, so reaching this point means
+        # something genuinely unexpected happened outside those guarded
+        # sections. Log the full traceback server-side for debugging, but
+        # never leak it (or raw absolute filesystem paths) into the HTTP
+        # response - the frontend only gets a safe, human-readable summary.
         log.exception("Failed to build model inventory")
-        return web.json_response({"error": str(e)}, status=500)
+        error_payload = {
+            "success": False,
+            "error": f"{type(e).__name__}: {e}",
+            "error_type": type(e).__name__,
+            "hint": "Check the ComfyUI server console/log for the full traceback.",
+        }
+        return web.json_response(error_payload, status=500)
 
 
 def setup_routes() -> None:

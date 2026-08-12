@@ -126,19 +126,50 @@ class ModelAnalyticsDashboard {
   async refresh() {
     try {
       const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(this.usedThresholdDays)}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      this.data = await res.json();
+
+      // Always try to read the JSON body, even on a non-2xx status.
+      // Previously a non-ok response threw immediately with only the raw
+      // HTTP status code ("HTTP 500"), discarding the structured
+      // {success, error, error_type} payload the backend actually sends -
+      // which is why the user only ever saw "Error loading data: HTTP
+      // 500" with no indication of what actually failed.
+      let payload = null;
+      try {
+        payload = await res.json();
+      } catch {
+        // Response wasn't JSON at all (e.g. a proxy/server error page
+        // instead of our API response) - fall through to the generic
+        // HTTP-status message below.
+      }
+
+      if (!res.ok || (payload && payload.success === false)) {
+        const serverMessage = payload?.error;
+        const detail = serverMessage ? serverMessage : `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
+
+      this.data = payload;
       if (typeof this.data.used_threshold_days === "number") {
         this.usedThresholdDays = this.data.used_threshold_days;
       }
     } catch (e) {
       const body = this.overlay?.querySelector(".ma-body");
       if (body) {
-        body.innerHTML = `<div class="ma-empty-state">Error loading data: ${e.message}</div>`;
+        // Show the real backend message when we have one. Full Python
+        // tracebacks are intentionally never sent to the frontend (they
+        // stay in the ComfyUI server console/log) - only the short
+        // human-readable summary the backend built for this purpose.
+        body.innerHTML = `<div class="ma-empty-state">Error loading data: ${this._escapeHtml(e.message)}</div>`;
       }
       return;
     }
     this.render();
+  }
+
+  _escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = String(str);
+    return div.innerHTML;
   }
 
   render() {
