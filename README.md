@@ -2,6 +2,8 @@
 
 A lightweight, read-only custom node for ComfyUI that helps you figure out which models you actually use and which ones are just wasting disk space.
 
+https://github.com/user-attachments/assets/7dfe80a5-28de-42bc-8989-bc9301c4389b
+
 <table>
   <tr>
     <td><img src="./.docs/used-models.png" alt="Used Models tab" width="480"/></td>
