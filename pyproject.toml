@@ -1,8 +1,20 @@
 [project]
 name = "ComfyUI-Model-Analytics"
-description = ""
+description = "Shows which models you actually use vs. which are just wasting disk space. Read-only, no deletion."
 version = "1.0.3"
 license = "MIT"
+keywords = [
+    "model management",
+    "disk space",
+    "storage",
+    "cleanup",
+    "checkpoint",
+    "lora",
+    "vae",
+    "unused models",
+    "dashboard",
+    "analytics",
+]
 
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)

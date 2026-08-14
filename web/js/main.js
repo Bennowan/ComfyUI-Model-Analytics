@@ -5,9 +5,14 @@ import { app } from "../../../scripts/app.js";
 // (main.js itself is loaded by ComfyUI's own extension loader - if you
 // don't see JS changes after an update, hard-refresh the browser tab,
 // e.g. Ctrl+Shift+R / Cmd+Shift+R, or disable cache in devtools.)
-const EXT_VERSION = "2";
+const EXT_VERSION = "3";
+
+// >>> REPLACE THIS with your actual GitHub repo URL <<<
+const GITHUB_REPO_URL = "https://github.com/Bennowan/ComfyUI-Model-Analytics";
 
 const CSS_HREF = `${new URL("../css/style.css", import.meta.url).href}?v=${EXT_VERSION}`;
+
+const STAR_BANNER_DISMISSED_KEY = "ma_star_banner_dismissed";
 
 function injectCss() {
   const existing = document.querySelector('link[data-ma-style="1"]');
@@ -76,6 +81,8 @@ class ModelAnalyticsDashboard {
       if (e.target === overlay) this.close();
     });
 
+    const showBanner = !localStorage.getItem(STAR_BANNER_DISMISSED_KEY);
+
     overlay.innerHTML = `
       <div class="ma-modal">
         <div class="ma-header">
@@ -86,9 +93,17 @@ class ModelAnalyticsDashboard {
               <input type="number" class="ma-stale-input" min="0" step="1" value="${this.usedThresholdDays}" />
               days
             </label>
+            <a class="ma-star-btn" href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer" title="Star this project on GitHub">★ Star on GitHub</a>
             <button class="ma-close-btn" title="Close">✕</button>
           </div>
         </div>
+        ${showBanner ? `
+        <div class="ma-star-banner">
+          <span>Enjoying this dashboard? A GitHub star helps other people find it.</span>
+          <a href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer">★ Star on GitHub</a>
+          <button class="ma-star-banner-dismiss" title="Dismiss">✕</button>
+        </div>
+        ` : ""}
         <div class="ma-tabs">
           <button class="ma-tab-btn" data-tab="used">Used Models</button>
           <button class="ma-tab-btn" data-tab="unused">Unused Models</button>
@@ -99,6 +114,14 @@ class ModelAnalyticsDashboard {
         </div>
       </div>
     `;
+
+    const bannerDismiss = overlay.querySelector(".ma-star-banner-dismiss");
+    if (bannerDismiss) {
+      bannerDismiss.addEventListener("click", () => {
+        localStorage.setItem(STAR_BANNER_DISMISSED_KEY, "1");
+        overlay.querySelector(".ma-star-banner")?.remove();
+      });
+    }
 
     overlay.querySelector(".ma-close-btn").addEventListener("click", () => this.close());
     overlay.querySelectorAll(".ma-tab-btn").forEach((btn) => {
@@ -126,50 +149,19 @@ class ModelAnalyticsDashboard {
   async refresh() {
     try {
       const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(this.usedThresholdDays)}`);
-
-      // Always try to read the JSON body, even on a non-2xx status.
-      // Previously a non-ok response threw immediately with only the raw
-      // HTTP status code ("HTTP 500"), discarding the structured
-      // {success, error, error_type} payload the backend actually sends -
-      // which is why the user only ever saw "Error loading data: HTTP
-      // 500" with no indication of what actually failed.
-      let payload = null;
-      try {
-        payload = await res.json();
-      } catch {
-        // Response wasn't JSON at all (e.g. a proxy/server error page
-        // instead of our API response) - fall through to the generic
-        // HTTP-status message below.
-      }
-
-      if (!res.ok || (payload && payload.success === false)) {
-        const serverMessage = payload?.error;
-        const detail = serverMessage ? serverMessage : `HTTP ${res.status}`;
-        throw new Error(detail);
-      }
-
-      this.data = payload;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      this.data = await res.json();
       if (typeof this.data.used_threshold_days === "number") {
         this.usedThresholdDays = this.data.used_threshold_days;
       }
     } catch (e) {
       const body = this.overlay?.querySelector(".ma-body");
       if (body) {
-        // Show the real backend message when we have one. Full Python
-        // tracebacks are intentionally never sent to the frontend (they
-        // stay in the ComfyUI server console/log) - only the short
-        // human-readable summary the backend built for this purpose.
-        body.innerHTML = `<div class="ma-empty-state">Error loading data: ${this._escapeHtml(e.message)}</div>`;
+        body.innerHTML = `<div class="ma-empty-state">Error loading data: ${e.message}</div>`;
       }
       return;
     }
     this.render();
-  }
-
-  _escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = String(str);
-    return div.innerHTML;
   }
 
   render() {
@@ -386,40 +378,5 @@ app.registerExtension({
         document.body.appendChild(menuButton);
       }
     }
-
-    // Self-cleanup: nothing about this extension is persisted anywhere
-    // (no cookies, no localStorage) - the button only exists because this
-    // script is currently running in the page. If the node gets
-    // uninstalled while the page is still open, the button would
-    // otherwise stay stuck until a hard refresh (Ctrl+F5), since the
-    // browser has already loaded and executed this module. Instead, we
-    // periodically ping our own backend route; once it 404s (route no
-    // longer registered because the node/package is gone), we remove the
-    // button and stop polling - no reload required, nothing to leave
-    // behind either way.
-    let missingCount = 0;
-    const REQUIRED_MISSING_STREAK = 2; // avoid a single transient network blip removing the button
-    const healthCheckInterval = setInterval(async () => {
-      try {
-        const res = await fetch("/model_analytics/inventory", { method: "HEAD" });
-        if (res.status === 404) {
-          missingCount++;
-        } else {
-          missingCount = 0;
-        }
-      } catch {
-        // Network hiccup or server restarting - don't count this as
-        // "uninstalled", just skip this check.
-        return;
-      }
-
-      if (missingCount >= REQUIRED_MISSING_STREAK) {
-        clearInterval(healthCheckInterval);
-        dashboard.close();
-        menuButton.remove();
-        const styleLink = document.querySelector('link[data-ma-style="1"]');
-        if (styleLink) styleLink.remove();
-      }
-    }, 30000);
   },
 });
