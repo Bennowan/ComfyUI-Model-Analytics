@@ -5,7 +5,7 @@ import { app } from "../../../scripts/app.js";
 // (main.js itself is loaded by ComfyUI's own extension loader - if you
 // don't see JS changes after an update, hard-refresh the browser tab,
 // e.g. Ctrl+Shift+R / Cmd+Shift+R, or disable cache in devtools.)
-const EXT_VERSION = "3";
+const EXT_VERSION = "4";
 
 // >>> REPLACE THIS with your actual GitHub repo URL <<<
 const GITHUB_REPO_URL = "https://github.com/Bennowan/ComfyUI-Model-Analytics";
@@ -13,6 +13,17 @@ const GITHUB_REPO_URL = "https://github.com/Bennowan/ComfyUI-Model-Analytics";
 const CSS_HREF = `${new URL("../css/style.css", import.meta.url).href}?v=${EXT_VERSION}`;
 
 const STAR_BANNER_DISMISSED_KEY = "ma_star_banner_dismissed";
+const USED_THRESHOLD_ENABLED_KEY = "ma_used_threshold_enabled";
+
+const USED_REASON_LABELS = {
+  recent_load: "Recently loaded",
+  workflow_reference: "In a workflow",
+  recent_load_and_workflow: "Recent + in a workflow",
+};
+
+function formatUsedReason(reason) {
+  return USED_REASON_LABELS[reason] || "—";
+}
 
 function injectCss() {
   const existing = document.querySelector('link[data-ma-style="1"]');
@@ -59,6 +70,18 @@ class ModelAnalyticsDashboard {
     this.selectedWorkflow = null;
     this.overlay = null;
     this.usedThresholdDays = 7;
+    // Whether the "Used within last N days" recency window applies at
+    // all. When off, a model only needs to have been loaded at SOME
+    // point (any age) - or be referenced by a saved workflow - to count
+    // as used. Persisted across dashboard opens like the star banner.
+    this.usedThresholdEnabled = true;
+    try {
+      const stored = localStorage.getItem(USED_THRESHOLD_ENABLED_KEY);
+      if (stored !== null) this.usedThresholdEnabled = stored === "1";
+    } catch {
+      // localStorage can throw (private browsing, blocked storage, etc.)
+      // - just keep the default of "enabled" rather than failing to open.
+    }
   }
 
   async open() {
@@ -88,9 +111,10 @@ class ModelAnalyticsDashboard {
         <div class="ma-header">
           <h2>📊 Model Analytics Dashboard</h2>
           <div class="ma-header-right">
-            <label class="ma-stale-control" title="A model counts as Used if it was loaded within this many days. Older or never-loaded models fall back to Unused automatically.">
+            <label class="ma-stale-control" title="A model referenced by a saved workflow always counts as Used. On top of that, a model also counts as Used if it was loaded within this many days - uncheck to count any past load, no matter how long ago.">
+              <input type="checkbox" class="ma-stale-toggle" ${this.usedThresholdEnabled ? "checked" : ""} />
               Used within last
-              <input type="number" class="ma-stale-input" min="0" step="1" value="${this.usedThresholdDays}" />
+              <input type="number" class="ma-stale-input" min="0" step="1" value="${this.usedThresholdDays}" ${this.usedThresholdEnabled ? "" : "disabled"} />
               days
             </label>
             <a class="ma-star-btn" href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer" title="Star this project on GitHub">★ Star on GitHub</a>
@@ -142,17 +166,39 @@ class ModelAnalyticsDashboard {
       }
     });
 
+    const staleToggle = overlay.querySelector(".ma-stale-toggle");
+    staleToggle.addEventListener("change", async () => {
+      this.usedThresholdEnabled = staleToggle.checked;
+      staleInput.disabled = !this.usedThresholdEnabled;
+      try {
+        localStorage.setItem(USED_THRESHOLD_ENABLED_KEY, this.usedThresholdEnabled ? "1" : "0");
+      } catch {
+        // Non-fatal - the preference just won't survive reopening the dashboard.
+      }
+      const body = overlay.querySelector(".ma-body");
+      body.innerHTML = `<div class="ma-summary">Loading data…</div>`;
+      await this.refresh();
+    });
+
     document.body.appendChild(overlay);
     this.overlay = overlay;
   }
 
   async refresh() {
     try {
-      const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(this.usedThresholdDays)}`);
+      const thresholdParam = this.usedThresholdEnabled ? this.usedThresholdDays : "off";
+      const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(thresholdParam)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this.data = await res.json();
+      // Only sync the day count back from the server when the recency
+      // filter is actually enabled server-side - when it's off, the
+      // server reports used_threshold_days: null and we want to keep
+      // whatever number was last typed in, ready for when it's re-enabled.
       if (typeof this.data.used_threshold_days === "number") {
         this.usedThresholdDays = this.data.used_threshold_days;
+      }
+      if (typeof this.data.used_threshold_enabled === "boolean") {
+        this.usedThresholdEnabled = this.data.used_threshold_enabled;
       }
     } catch (e) {
       const body = this.overlay?.querySelector(".ma-body");
@@ -206,13 +252,16 @@ class ModelAnalyticsDashboard {
     const used = this.data.models.filter((m) => !m.unused);
     const state = this.sortState.used;
     const sorted = this.sortRows(used, state.col, state.dir);
+    const recencyNote = this.usedThresholdEnabled
+      ? `loaded within the last ${this.usedThresholdDays} day(s)`
+      : `loaded at any point (recency filter off)`;
 
     if (!sorted.length) {
-      return `<div class="ma-empty-state">No models used within the last ${this.usedThresholdDays} day(s).</div>`;
+      return `<div class="ma-empty-state">No models are currently referenced by a saved workflow, and none were ${recencyNote}.</div>`;
     }
 
     return `
-      <div class="ma-summary"><b>${used.length}</b> used models out of <b>${this.data.total_models}</b> total (loaded within the last ${this.usedThresholdDays} day(s)).</div>
+      <div class="ma-summary"><b>${used.length}</b> used models out of <b>${this.data.total_models}</b> total — referenced by a saved workflow, and/or ${recencyNote}.</div>
       <div class="ma-table-scroll">
         <table class="ma-table" data-table="used">
           <thead>
@@ -220,6 +269,7 @@ class ModelAnalyticsDashboard {
               ${this.headerCell("Name", "rel_path", "used")}
               ${this.headerCell("Size", "size_bytes", "used")}
               ${this.headerCell("Workflows", "workflows", "used")}
+              ${this.headerCell("Why", "used_reason", "used")}
               ${this.headerCell("Uses", "use_count", "used")}
               ${this.headerCell("Last Used", "last_used", "used")}
             </tr>
@@ -230,6 +280,7 @@ class ModelAnalyticsDashboard {
                 <td title="${m.rel_path}">${m.rel_path}</td>
                 <td>${formatBytes(m.size_bytes)}</td>
                 <td title="${m.workflows.join(', ')}">${m.workflows.length ? m.workflows.join(", ") : "—"}</td>
+                <td>${formatUsedReason(m.used_reason)}</td>
                 <td>${m.use_count}</td>
                 <td>${formatDate(m.last_used)}</td>
               </tr>
@@ -245,13 +296,16 @@ class ModelAnalyticsDashboard {
     const state = this.sortState.unused;
     const sorted = this.sortRows(unused, state.col, state.dir);
     const totalBytes = this.data.total_unused_bytes;
+    const recencyNote = this.usedThresholdEnabled
+      ? `wasn't loaded within the last ${this.usedThresholdDays} day(s)`
+      : `has never been loaded`;
 
     if (!sorted.length) {
       return `<div class="ma-empty-state">No unused models found. 🎉</div>`;
     }
 
     return `
-      <div class="ma-summary"><b>${unused.length}</b> unused models, totalling <b>${formatBytes(totalBytes)}</b> of disk space. A model lands here if it has never been used, or wasn't used within the last ${this.usedThresholdDays} day(s).</div>
+      <div class="ma-summary"><b>${unused.length}</b> unused models, totalling <b>${formatBytes(totalBytes)}</b> of disk space. A model lands here only if it's <b>not</b> referenced by any saved workflow, and ${recencyNote}.</div>
       <div class="ma-table-scroll">
         <table class="ma-table" data-table="unused">
           <thead>

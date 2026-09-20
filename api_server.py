@@ -4,15 +4,30 @@ Registers a single read-only aiohttp endpoint that the frontend polls to
 render the dashboard. No mutation endpoints exist by design.
 
 Categorization note:
-Whether a model is "Used" or "Unused" is decided ONLY by how recently it
-was actually loaded (tracker.py's last_used timestamp), evaluated fresh on
-every request via tracker.is_recently_used(). No permanent "used" flag is
-ever stored - a model that hasn't been loaded again within the configured
-threshold automatically falls back to Unused, even if it's still
-referenced by a saved workflow. Workflow references are surfaced purely
-as informational metadata in the "workflows" field.
+A model is "Used" if EITHER of the following holds, evaluated fresh on
+every request (no permanent "used" flag is ever stored):
+  1. It was actually loaded recently enough (tracker.py's last_used
+     timestamp, checked via tracker.is_recently_used()).
+  2. It is still referenced by at least one saved workflow file, per
+     scanner.scan_workflows() - regardless of how long ago that workflow
+     was last run, or whether it's ever been run at all in a session this
+     extension was installed for.
+A model only falls into "Unused" when BOTH are false: nothing on disk
+currently points to it, and it hasn't been loaded within the recency
+window either. Criterion 2 is what keeps a model that's clearly still
+wired into a saved workflow from showing up as "wasted disk space" just
+because the workflow itself hasn't been (re-)run recently - which used to
+be the only thing this endpoint reported (see CHANGELOG / issue reports:
+"Used Models" showing empty while the same models were plainly visible
+under "Workflow View").
+
+The recency window itself (criterion 1) is configurable per-request via
+the `used_threshold_days` query param, and can also be disabled entirely
+(see get_inventory() below) so that any model ever loaded - no matter how
+long ago - counts as used, without needing a workflow reference.
 """
 
+import math
 import logging
 from aiohttp import web
 
@@ -101,12 +116,27 @@ def _build_inventory(threshold_days: float = None) -> dict:
             last_used_iso = hist_entry.get("last_used") if hist_entry else None
             use_count = hist_entry.get("use_count", 0) if hist_entry else 0
 
-            # Categorization is recalculated fresh every request from the
-            # stored timestamp - never from a persisted "used" flag. A model
-            # never loaded, or not loaded within `threshold_days`, is unused -
-            # regardless of whether it's still referenced by a workflow.
+            # Categorization is recalculated fresh every request, never from
+            # a persisted "used" flag - but it's now decided by TWO
+            # independent signals, either of which is enough to keep a
+            # model out of "Unused":
+            #   - recently_used: loaded within `threshold_days` (or ever
+            #     loaded at all, if the recency window is disabled - see
+            #     get_inventory()).
+            #   - referenced: at least one saved workflow currently
+            #     mentions this file, regardless of how long ago (or
+            #     whether) that workflow was actually run.
             recently_used = is_recently_used(last_used_iso, threshold_days)
-            is_unused = not recently_used
+            referenced = bool(referenced_in)
+            is_unused = not (recently_used or referenced)
+
+            used_reason = None
+            if recently_used and referenced:
+                used_reason = "recent_load_and_workflow"
+            elif recently_used:
+                used_reason = "recent_load"
+            elif referenced:
+                used_reason = "workflow_reference"
 
             size_bytes = model.get("size_bytes", 0) or 0
             if is_unused:
@@ -120,6 +150,7 @@ def _build_inventory(threshold_days: float = None) -> dict:
                 "use_count": use_count,
                 "last_used": last_used_iso,
                 "unused": is_unused,
+                "used_reason": used_reason,
             })
         except Exception:
             skipped_models += 1
@@ -129,6 +160,12 @@ def _build_inventory(threshold_days: float = None) -> dict:
     if skipped_models:
         log.warning("Skipped %d model(s) while building inventory due to per-item errors", skipped_models)
 
+    # math.inf isn't valid JSON (JS's JSON.parse chokes on a literal
+    # `Infinity`), so the "recency filter is disabled" state is encoded as
+    # used_threshold_days: null + used_threshold_enabled: false instead of
+    # trying to serialize the infinite value itself.
+    threshold_disabled = math.isinf(threshold_days)
+
     return {
         "success": True,
         "models": inventory,
@@ -136,7 +173,8 @@ def _build_inventory(threshold_days: float = None) -> dict:
         "workflow_map": workflow_map,
         "total_unused_bytes": total_unused_bytes,
         "total_models": len(inventory),
-        "used_threshold_days": threshold_days,
+        "used_threshold_days": None if threshold_disabled else threshold_days,
+        "used_threshold_enabled": not threshold_disabled,
         "workflows_debug": workflows_debug,
         "skipped_models": skipped_models,
     }
@@ -148,13 +186,29 @@ async def get_inventory(request: web.Request) -> web.Response:
         # persistent, configured value always comes from
         # tracker.get_used_threshold_days() (env var
         # MODEL_ANALYTICS_USED_THRESHOLD_DAYS, default 7).
+        #
+        # `used_threshold_days` also accepts a handful of "turn the
+        # recency window off entirely" spellings (the frontend sends
+        # "off" via its optional-filter checkbox), in which case every
+        # model that was EVER loaded counts as used regardless of age -
+        # see tracker.is_recently_used()'s math.inf handling.
         threshold_days = None
         raw = request.query.get("used_threshold_days")
         if raw is not None:
-            try:
-                threshold_days = float(raw)
-            except ValueError:
-                pass
+            normalized = raw.strip().lower()
+            if normalized in ("off", "disabled", "none", "unlimited", ""):
+                threshold_days = math.inf
+            else:
+                try:
+                    parsed = float(raw)
+                    if parsed > 0 and math.isfinite(parsed):
+                        threshold_days = parsed
+                    # A non-positive, NaN, or "Infinity"-as-a-number value
+                    # from a malformed request: fall back to the
+                    # configured default rather than 500ing or silently
+                    # accepting a nonsensical window.
+                except ValueError:
+                    pass
         data = _build_inventory(threshold_days=threshold_days)
         return web.json_response(data)
     except Exception as e:
