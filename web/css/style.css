@@ -54,6 +54,14 @@
   white-space: nowrap;
 }
 
+.ma-stale-toggle {
+  cursor: pointer;
+  accent-color: #5b8cff;
+}
+.ma-stale-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .ma-stale-input {
   width: 48px;
   background: #23262e;

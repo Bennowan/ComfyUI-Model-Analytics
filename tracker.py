@@ -10,6 +10,7 @@ setups where the container user differs from the image-build user.
 
 import os
 import json
+import math
 import logging
 import threading
 from pathlib import Path
@@ -93,12 +94,23 @@ def is_recently_used(last_used: Optional[str], threshold_days: Optional[float] =
     A model with no last_used timestamp (never loaded) is never "recently
     used". A model last loaded more than `threshold_days` ago falls back
     to unused automatically, with no permanent state involved.
+
+    threshold_days:
+      - None (default): resolve the configured default via
+        get_used_threshold_days() (env var, or the 7-day fallback).
+      - a positive, finite number: the normal recency window, in days.
+      - math.inf: the recency window is disabled - any model that was
+        EVER loaded counts as "recently used", no matter how long ago.
     """
     dt = _parse_last_used(last_used)
     if dt is None:
         return False
     if threshold_days is None:
         threshold_days = get_used_threshold_days()
+    if math.isinf(threshold_days):
+        # timedelta(days=inf) raises OverflowError, so handle this before
+        # the arithmetic below.
+        return True
     age = datetime.now(timezone.utc) - dt
     return age <= timedelta(days=threshold_days)
 
