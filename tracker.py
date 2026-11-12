@@ -44,30 +44,15 @@ _history_loaded = False
 _history_loaded_mtime: Optional[float] = None
 
 # How many days a model counts as "used" after its last load, before it
-# falls back into "Unused Models". Configurable via env var so deployments
-# can tune it without touching code; default matches the product spec.
+# falls back into "Unused Models". This is only the default: the dashboard
+# sends its own value with every request (and remembers it in the browser).
 DEFAULT_USED_THRESHOLD_DAYS = 7
 
 
 def get_used_threshold_days() -> float:
-    """Single source of truth for the recency window. Reads from the
-    MODEL_ANALYTICS_USED_THRESHOLD_DAYS env var if set (falls back to the
-    default on missing/invalid values), so the threshold is configurable
-    in exactly one place instead of being hard-coded across the codebase."""
-    raw = os.environ.get("MODEL_ANALYTICS_USED_THRESHOLD_DAYS")
-    if raw is None:
-        return DEFAULT_USED_THRESHOLD_DAYS
-    try:
-        value = float(raw)
-        if value <= 0:
-            raise ValueError
-        return value
-    except ValueError:
-        log.warning(
-            "Invalid MODEL_ANALYTICS_USED_THRESHOLD_DAYS=%r, falling back to default of %s days",
-            raw, DEFAULT_USED_THRESHOLD_DAYS,
-        )
-        return DEFAULT_USED_THRESHOLD_DAYS
+    """Default recency window in days, used when a request does not
+    specify one. The window is adjusted in the dashboard."""
+    return float(DEFAULT_USED_THRESHOLD_DAYS)
 
 
 def _parse_last_used(last_used: Optional[str]) -> Optional[datetime]:
@@ -97,7 +82,7 @@ def is_recently_used(last_used: Optional[str], threshold_days: Optional[float] =
 
     threshold_days:
       - None (default): resolve the configured default via
-        get_used_threshold_days() (env var, or the 7-day fallback).
+        get_used_threshold_days() (the 7-day default).
       - a positive, finite number: the normal recency window, in days.
       - math.inf: the recency window is disabled - any model that was
         EVER loaded counts as "recently used", no matter how long ago.

@@ -36,7 +36,10 @@ except ImportError:  # allows the module to be imported/tested outside ComfyUI
 
 log = logging.getLogger("ModelAnalytics")
 
-MODEL_EXTENSIONS = (".safetensors", ".ckpt", ".gguf", ".pt")
+# .pth (upscalers, some ControlNets), .sft (Flux-style), .onnx and .bin
+# (CLIP vision, misc. loaders) are used by real ComfyUI model folders too.
+# Note: .bin can also appear in diffusers-style folders as sharded weights.
+MODEL_EXTENSIONS = (".safetensors", ".ckpt", ".gguf", ".pt", ".pth", ".sft", ".onnx", ".bin")
 
 # ComfyUI (and users manually) mark a model as disabled by appending
 # ".disabled" after the real extension, e.g. "model.safetensors.disabled".

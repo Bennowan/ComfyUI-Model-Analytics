@@ -27,6 +27,47 @@ from .tracker import get_history, is_recently_used, get_used_threshold_days
 log = logging.getLogger("ModelAnalytics")
 
 
+_MATCH_RANK = {"exact": 3, "suffix": 2, "basename": 1}
+
+
+def _match_workflows(rel_path, workflow_map, keys_by_basename, disk_rel_paths, basename_is_unique):
+    """Find the saved workflows that reference one disk model.
+
+    ComfyUI's loader dropdowns store the path relative to the model-kind
+    root, so an EXACT match on rel_path is the normal case. Weaker
+    fallbacks exist for workflows with a different prefix, but they must
+    never grab a file that a workflow key already identifies exactly:
+
+      exact    - workflow key == rel_path
+      suffix   - workflow key is longer and ends with "/" + rel_path
+                 (e.g. "checkpoints/foo.safetensors" vs "foo.safetensors")
+      basename - workflow key is a bare file name and rel_path is the only
+                 file with that name on disk
+
+    A key that exactly matches some OTHER file on disk belongs to that
+    file and is skipped here. Returns (sorted workflow names, best match
+    type or None).
+    """
+    basename = rel_path.rsplit("/", 1)[-1]
+    found = set()
+    best = None
+    for key in keys_by_basename.get(basename, ()):
+        if key == rel_path:
+            match = "exact"
+        elif key in disk_rel_paths:
+            continue
+        elif key.endswith("/" + rel_path):
+            match = "suffix"
+        elif key == basename and basename_is_unique:
+            match = "basename"
+        else:
+            continue
+        found.update(workflow_map.get(key, ()))
+        if best is None or _MATCH_RANK[match] > _MATCH_RANK[best]:
+            best = match
+    return sorted(found), best
+
+
 def _build_inventory(threshold_days: float = None) -> dict:
     if threshold_days is None:
         threshold_days = get_used_threshold_days()
@@ -68,23 +109,28 @@ def _build_inventory(threshold_days: float = None) -> dict:
         log.exception("Building workflows debug info failed")
         workflows_debug = {}
 
-    # Build a quick lookup of workflow-referenced names for matching against
-    # disk rel_paths. We match on both the full rel_path and just the
-    # basename, since workflow JSON does not always store the full
-    # subfolder-qualified path. A match counts as a workflow reference
-    # in the used/unused categorization below.
+    # Lookup tables for matching. "Disabled" files (name.ext.disabled) live
+    # in their own bucket and take no part in matching.
+    active_models = [m for m in disk_models if not m.get("disabled")]
+    disk_rel_paths = {m["rel_path"] for m in active_models if m.get("rel_path")}
+    basename_counts = {}
+    for rp in disk_rel_paths:
+        b = rp.rsplit("/", 1)[-1]
+        basename_counts[b] = basename_counts.get(b, 0) + 1
+
     workflow_keys_by_basename = {}
     for key in workflow_map:
-        basename = key.split("/")[-1]
-        workflow_keys_by_basename.setdefault(basename, []).extend(workflow_map[key])
+        workflow_keys_by_basename.setdefault(key.rsplit("/", 1)[-1], []).append(key)
 
-    history_keys_by_basename = {}
-    for key in history:
-        basename = key.split("/")[-1]
-        history_keys_by_basename.setdefault(basename, key)
+    # History keys are normally full relative paths. Keys without a "/"
+    # come from tracker._relativize()'s basename fallback and may only be
+    # used for a disk file whose name is unique.
+    history_bare_keys = {k: v for k, v in history.items() if "/" not in k}
 
     inventory = []
     total_unused_bytes = 0
+    total_disabled_bytes = 0
+    disabled_count = 0
     skipped_models = 0
 
     for model in disk_models:
@@ -94,14 +140,38 @@ def _build_inventory(threshold_days: float = None) -> dict:
         # the response.
         try:
             rel_path = model["rel_path"]
-            basename = rel_path.split("/")[-1]
+            basename = rel_path.rsplit("/", 1)[-1]
 
-            referenced_in = workflow_map.get(rel_path) or workflow_keys_by_basename.get(basename, [])
+            if model.get("disabled"):
+                # Disabled files are neither used nor unused - own bucket.
+                disabled_size = model.get("size_bytes", 0) or 0
+                total_disabled_bytes += disabled_size
+                disabled_count += 1
+                inventory.append({
+                    "kind": model.get("kind", "unknown"),
+                    "rel_path": rel_path,
+                    "size_bytes": disabled_size,
+                    "workflows": [],
+                    "workflow_match": None,
+                    "use_count": 0,
+                    "last_used": None,
+                    "unused": False,
+                    "disabled": True,
+                    "used_reason": None,
+                })
+                continue
+
+            referenced_in, workflow_match = _match_workflows(
+                rel_path,
+                workflow_map,
+                workflow_keys_by_basename,
+                disk_rel_paths,
+                basename_counts.get(basename, 0) == 1,
+            )
 
             hist_entry = history.get(rel_path)
-            if hist_entry is None:
-                hist_key = history_keys_by_basename.get(basename)
-                hist_entry = history.get(hist_key) if hist_key else None
+            if hist_entry is None and basename_counts.get(basename, 0) == 1:
+                hist_entry = history_bare_keys.get(basename)
 
             last_used_iso = hist_entry.get("last_used") if hist_entry else None
             use_count = hist_entry.get("use_count", 0) if hist_entry else 0
@@ -130,10 +200,12 @@ def _build_inventory(threshold_days: float = None) -> dict:
                 "kind": model.get("kind", "unknown"),
                 "rel_path": rel_path,
                 "size_bytes": size_bytes,
-                "workflows": sorted(set(referenced_in)),
+                "workflows": referenced_in,
+                "workflow_match": workflow_match,
                 "use_count": use_count,
                 "last_used": last_used_iso,
                 "unused": is_unused,
+                "disabled": False,
                 "used_reason": used_reason,
             })
         except Exception:
@@ -153,7 +225,9 @@ def _build_inventory(threshold_days: float = None) -> dict:
         "workflow_names": workflow_names,
         "workflow_map": workflow_map,
         "total_unused_bytes": total_unused_bytes,
-        "total_models": len(inventory),
+        "total_models": len(inventory) - disabled_count,
+        "total_disabled": disabled_count,
+        "total_disabled_bytes": total_disabled_bytes,
         "used_threshold_days": None if threshold_disabled else threshold_days,
         "used_threshold_enabled": not threshold_disabled,
         "workflows_debug": workflows_debug,
@@ -163,10 +237,8 @@ def _build_inventory(threshold_days: float = None) -> dict:
 
 async def get_inventory(request: web.Request) -> web.Response:
     try:
-        # Optional per-request override for experimentation/testing; the
-        # persistent, configured value always comes from
-        # tracker.get_used_threshold_days() (env var
-        # MODEL_ANALYTICS_USED_THRESHOLD_DAYS, default 7).
+        # The dashboard sends its chosen window with every request. Without
+        # the parameter, tracker.get_used_threshold_days() (default 7) is used.
         threshold_days = None
         raw = request.query.get("used_threshold_days")
         if raw is not None:

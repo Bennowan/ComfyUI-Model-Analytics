@@ -5,7 +5,7 @@ import { app } from "../../../scripts/app.js";
 // (main.js itself is loaded by ComfyUI's own extension loader - if you
 // don't see JS changes after an update, hard-refresh the browser tab,
 // e.g. Ctrl+Shift+R / Cmd+Shift+R, or disable cache in devtools.)
-const EXT_VERSION = "4";
+const EXT_VERSION = "5";
 
 // >>> REPLACE THIS with your actual GitHub repo URL <<<
 const GITHUB_REPO_URL = "https://github.com/Bennowan/ComfyUI-Model-Analytics";
@@ -14,13 +14,30 @@ const CSS_HREF = `${new URL("../css/style.css", import.meta.url).href}?v=${EXT_V
 
 const STAR_BANNER_DISMISSED_KEY = "ma_star_banner_dismissed";
 const USED_THRESHOLD_ENABLED_KEY = "ma_used_threshold_enabled";
+const USED_THRESHOLD_DAYS_KEY = "ma_used_threshold_days";
 const USED_REASON_LABELS = {
   recent_load: "Recently loaded",
   workflow_reference: "In a workflow",
   recent_load_and_workflow: "Recent + in a workflow",
 };
-function formatUsedReason(reason) {
-  return USED_REASON_LABELS[reason] || "—";
+
+// File names, workflow names and error messages are inserted via
+// innerHTML, so everything that did not come from this file must be
+// escaped - a model called  a"b<img onerror=...>.safetensors  must not
+// break (or script) the dashboard.
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function usedReasonCell(m) {
+  const label = USED_REASON_LABELS[m.used_reason] || "—";
+  const viaWorkflow = m.used_reason && m.used_reason.includes("workflow");
+  if (viaWorkflow && (m.workflow_match === "suffix" || m.workflow_match === "basename")) {
+    return `${label} <span title="Matched by file name / partial path only, not by the full path inside the models folder.">≈</span>`;
+  }
+  return label;
 }
 
 function injectCss() {
@@ -64,7 +81,7 @@ class ModelAnalyticsDashboard {
   constructor() {
     this.data = null;
     this.activeTab = "used";
-    this.sortState = { used: { col: "last_used", dir: -1 }, unused: { col: "size_bytes", dir: -1 } };
+    this.sortState = { used: { col: "last_used", dir: -1 }, unused: { col: "size_bytes", dir: -1 }, disabled: { col: "size_bytes", dir: -1 } };
     this.selectedWorkflow = null;
     this.overlay = null;
     this.usedThresholdDays = 7;
@@ -74,6 +91,8 @@ class ModelAnalyticsDashboard {
     try {
       const stored = localStorage.getItem(USED_THRESHOLD_ENABLED_KEY);
       if (stored !== null) this.usedThresholdEnabled = stored === "1";
+      const storedDays = parseFloat(localStorage.getItem(USED_THRESHOLD_DAYS_KEY));
+      if (Number.isFinite(storedDays) && storedDays > 0) this.usedThresholdDays = storedDays;
     } catch {
       // localStorage can throw (private browsing etc.) - keep the default.
     }
@@ -126,6 +145,7 @@ class ModelAnalyticsDashboard {
         <div class="ma-tabs">
           <button class="ma-tab-btn" data-tab="used">Used Models</button>
           <button class="ma-tab-btn" data-tab="unused">Unused Models</button>
+          <button class="ma-tab-btn" data-tab="disabled">Disabled</button>
           <button class="ma-tab-btn" data-tab="workflow">Workflow View</button>
         </div>
         <div class="ma-body">
@@ -155,6 +175,11 @@ class ModelAnalyticsDashboard {
       const val = parseFloat(staleInput.value);
       if (!isNaN(val) && val > 0) {
         this.usedThresholdDays = val;
+        try {
+          localStorage.setItem(USED_THRESHOLD_DAYS_KEY, String(val));
+        } catch {
+          // Non-fatal - the value just won't survive reopening.
+        }
         const body = overlay.querySelector(".ma-body");
         body.innerHTML = `<div class="ma-summary">Loading data…</div>`;
         await this.refresh();
@@ -196,7 +221,7 @@ class ModelAnalyticsDashboard {
     } catch (e) {
       const body = this.overlay?.querySelector(".ma-body");
       if (body) {
-        body.innerHTML = `<div class="ma-empty-state">Error loading data: ${e.message}</div>`;
+        body.innerHTML = `<div class="ma-empty-state">Error loading data: ${escapeHtml(e.message)}</div>`;
       }
       return;
     }
@@ -219,6 +244,8 @@ class ModelAnalyticsDashboard {
       body.innerHTML = this.renderUsedTab();
     } else if (this.activeTab === "unused") {
       body.innerHTML = this.renderUnusedTab();
+    } else if (this.activeTab === "disabled") {
+      body.innerHTML = this.renderDisabledTab();
     } else {
       body.innerHTML = this.renderWorkflowTab();
     }
@@ -242,7 +269,7 @@ class ModelAnalyticsDashboard {
   }
 
   renderUsedTab() {
-    const used = this.data.models.filter((m) => !m.unused);
+    const used = this.data.models.filter((m) => !m.unused && !m.disabled);
     const state = this.sortState.used;
     const sorted = this.sortRows(used, state.col, state.dir);
     const recencyNote = this.usedThresholdEnabled
@@ -270,12 +297,12 @@ class ModelAnalyticsDashboard {
           <tbody>
             ${sorted.map((m) => `
               <tr>
-                <td title="${m.rel_path}">${m.rel_path}</td>
+                <td title="${escapeHtml(m.rel_path)}">${escapeHtml(m.rel_path)}</td>
                 <td>${formatBytes(m.size_bytes)}</td>
-                <td title="${m.workflows.join(', ')}">${m.workflows.length ? m.workflows.join(", ") : "—"}</td>
-                <td>${formatUsedReason(m.used_reason)}</td>
+                <td title="${escapeHtml(m.workflows.join(', '))}">${m.workflows.length ? escapeHtml(m.workflows.join(", ")) : "—"}</td>
+                <td>${usedReasonCell(m)}</td>
                 <td>${m.use_count}</td>
-                <td>${formatDate(m.last_used)}</td>
+                <td>${escapeHtml(formatDate(m.last_used))}</td>
               </tr>
             `).join("")}
           </tbody>
@@ -285,7 +312,7 @@ class ModelAnalyticsDashboard {
   }
 
   renderUnusedTab() {
-    const unused = this.data.models.filter((m) => m.unused);
+    const unused = this.data.models.filter((m) => m.unused && !m.disabled);
     const state = this.sortState.unused;
     const sorted = this.sortRows(unused, state.col, state.dir);
     const totalBytes = this.data.total_unused_bytes;
@@ -312,10 +339,44 @@ class ModelAnalyticsDashboard {
           <tbody>
             ${sorted.map((m) => `
               <tr>
-                <td title="${m.rel_path}">${m.rel_path}</td>
-                <td><span class="ma-badge">${m.kind}</span></td>
+                <td title="${escapeHtml(m.rel_path)}">${escapeHtml(m.rel_path)}</td>
+                <td><span class="ma-badge">${escapeHtml(m.kind)}</span></td>
                 <td>${formatBytes(m.size_bytes)}</td>
-                <td>${formatDate(m.last_used)}</td>
+                <td>${escapeHtml(formatDate(m.last_used))}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  renderDisabledTab() {
+    const disabled = this.data.models.filter((m) => m.disabled);
+    const state = this.sortState.disabled;
+    const sorted = this.sortRows(disabled, state.col, state.dir);
+
+    if (!sorted.length) {
+      return `<div class="ma-empty-state">No disabled model files found.</div>`;
+    }
+
+    return `
+      <div class="ma-summary"><b>${sorted.length}</b> disabled model file(s) (name ends in <code>.disabled</code>), totalling <b>${formatBytes(this.data.total_disabled_bytes || 0)}</b>. They are counted as neither used nor unused.</div>
+      <div class="ma-table-scroll">
+        <table class="ma-table" data-table="disabled">
+          <thead>
+            <tr>
+              ${this.headerCell("Name", "rel_path", "disabled")}
+              ${this.headerCell("Category", "kind", "disabled")}
+              ${this.headerCell("Size", "size_bytes", "disabled")}
+            </tr>
+          </thead>
+          <tbody>
+            ${sorted.map((m) => `
+              <tr>
+                <td title="${escapeHtml(m.rel_path)}">${escapeHtml(m.rel_path)}</td>
+                <td><span class="ma-badge">${escapeHtml(m.kind)}</span></td>
+                <td>${formatBytes(m.size_bytes)}</td>
               </tr>
             `).join("")}
           </tbody>
@@ -339,7 +400,7 @@ class ModelAnalyticsDashboard {
 
     return `
       <select class="ma-select" data-role="workflow-select">
-        ${names.map((n) => `<option value="${n}" ${n === this.selectedWorkflow ? "selected" : ""}>${n}</option>`).join("")}
+        ${names.map((n) => `<option value="${escapeHtml(n)}" ${n === this.selectedWorkflow ? "selected" : ""}>${escapeHtml(n)}</option>`).join("")}
       </select>
       ${modelsInWorkflow.length ? `
         <div class="ma-table-scroll">
@@ -350,8 +411,8 @@ class ModelAnalyticsDashboard {
             <tbody>
               ${modelsInWorkflow.map((m) => `
                 <tr>
-                  <td title="${m.rel_path}">${m.rel_path}</td>
-                  <td><span class="ma-badge">${m.kind}</span></td>
+                  <td title="${escapeHtml(m.rel_path)}">${escapeHtml(m.rel_path)}</td>
+                  <td><span class="ma-badge">${escapeHtml(m.kind)}</span></td>
                   <td>${formatBytes(m.size_bytes)}</td>
                   <td><span class="ma-badge ma-badge-used">found</span></td>
                 </tr>
@@ -359,7 +420,7 @@ class ModelAnalyticsDashboard {
             </tbody>
           </table>
         </div>
-      ` : `<div class="ma-empty-state">In "${this.selectedWorkflow}" references models that were not found on disk (or this workflow does not reference any model files).</div>`}
+      ` : `<div class="ma-empty-state">No model files from "${escapeHtml(this.selectedWorkflow)}" were found on disk (or this workflow does not reference any model files).</div>`}
     `;
   }
 
