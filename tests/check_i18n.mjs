@@ -1,0 +1,95 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  LANGUAGES,
+  FALLBACK_LANGUAGE,
+  createTranslator,
+  escapeHtml,
+  isSupportedLanguage,
+  mapComfyLocale,
+} from '../web/js/i18n/index.js';
+
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const mainSource = fs.readFileSync(path.join(projectRoot, 'web/js/main.js'), 'utf8');
+const base = LANGUAGES.find((language) => language.code === FALLBACK_LANGUAGE)?.messages;
+assert.ok(base, 'English fallback locale must exist');
+const baseKeys = Object.keys(base).sort();
+const placeholders = (value) => [...value.matchAll(/\{(\w+)\}/g)].map((match) => match[1]).sort();
+
+const expectedCodes = ['en', 'de', 'zh', 'zh-TW', 'ja', 'ko'];
+assert.deepEqual(LANGUAGES.map(({ code }) => code), expectedCodes);
+
+for (const language of LANGUAGES) {
+  const messages = language.messages;
+  const keys = Object.keys(messages).sort();
+  assert.deepEqual(keys, baseKeys, `${language.code}: translation keys must match English`);
+  for (const key of baseKeys) {
+    assert.equal(typeof messages[key], 'string', `${language.code}.${key}: value must be a string`);
+    assert.ok(messages[key].trim(), `${language.code}.${key}: translation must not be empty`);
+    assert.deepEqual(
+      placeholders(messages[key]),
+      placeholders(base[key]),
+      `${language.code}.${key}: interpolation placeholders must match English`,
+    );
+  }
+}
+
+const literalKeys = new Set();
+for (const match of mainSource.matchAll(/(?:\.h|\.t|headerCell)\(\s*['"]([\w.]+)['"]/g)) {
+  literalKeys.add(match[1]);
+}
+for (const key of literalKeys) {
+  assert.ok(key in base, `main.js references missing translation key: ${key}`);
+}
+for (const key of [
+  'tab.used', 'tab.unused', 'tab.disabled', 'tab.workflow', 'tab.settings',
+  'settings.group.appearance', 'settings.theme.name', 'settings.theme.tooltip',
+  'settings.theme.auto', 'settings.theme.dark', 'settings.theme.light',
+  'settings.panel.description', 'settings.saveError',
+  'reason.recent_load', 'reason.recent_queue', 'reason.workflow_reference',
+  'used.empty.window', 'used.empty.all', 'used.summary.window', 'used.summary.all',
+  'unused.summary.window', 'unused.summary.all',
+]) {
+  assert.ok(key in base, `dynamic translation key must exist: ${key}`);
+}
+
+const localeCases = new Map([
+  ['en', 'en'], ['en-US', 'en'], ['de', 'de'], ['de-DE', 'de'],
+  ['zh', 'zh'], ['zh-CN', 'zh'], ['zh-Hans', 'zh'], ['zh_TW', 'zh-TW'],
+  ['zh-Hant', 'zh-TW'], ['zh-HK', 'zh-TW'], ['ja', 'ja'], ['ja-JP', 'ja'],
+  ['ko', 'ko'], ['ko-KR', 'ko'], ['fr', 'en'], ['pt-BR', 'en'], ['', 'en'],
+]);
+for (const [input, expected] of localeCases) {
+  assert.equal(mapComfyLocale(input), expected, `locale mapping for ${input}`);
+}
+assert.equal(mapComfyLocale(undefined), 'en');
+assert.equal(isSupportedLanguage('zh-TW'), true);
+assert.equal(isSupportedLanguage('zh-HK'), false);
+assert.equal(createTranslator('not-a-language').code, 'en');
+
+assert.equal(escapeHtml('<script a="b">&\'x\'</script>'), '&lt;script a=&quot;b&quot;&gt;&amp;&#39;x&#39;&lt;/script&gt;');
+const translator = createTranslator('de');
+const safe = translator.tHtml('workflow.noModels', { name: '<img src=x onerror=alert(1)>' });
+assert.ok(!safe.includes('<img'), 'untrusted interpolation must be HTML-escaped');
+assert.ok(safe.includes('&lt;img'), 'escaped markup must remain visible as text');
+const marked = translator.tHtml('disabled.summary', {
+  count: { text: '4', html: '<b>4</b>' },
+  suffix: { text: '.disabled', html: '<code>.disabled</code>' },
+  size: { text: '2 GiB', html: '<b>2 GiB</b>' },
+});
+assert.ok(marked.includes('<b>4</b>'));
+assert.ok(marked.includes('<code>.disabled</code>'));
+assert.ok(!marked.includes('<img'));
+
+assert.ok(mainSource.includes('const DATA_TABS = ["used", "unused", "disabled", "workflow"]'), 'settings tab must not become a data default tab');
+assert.ok(mainSource.includes('this.activeTab === "settings"'), 'dashboard must render its in-dashboard settings tab');
+assert.ok(mainSource.includes('this.attachSettingsHandlers(overlay.querySelector(".ma-body"))'), 'settings controls must use a persistent delegated handler');
+assert.ok(mainSource.includes('ModelAnalytics.Theme'), 'dashboard theme must be a persisted ComfyUI setting');
+const css = fs.readFileSync(path.join(projectRoot, 'web/css/style.css'), 'utf8');
+assert.ok(css.includes('.ma-overlay[data-ma-theme="dark"]'), 'dark dashboard override must exist');
+assert.ok(css.includes('.ma-overlay[data-ma-theme="light"]'), 'light dashboard override must exist');
+assert.ok(css.includes('.ma-settings-page'), 'settings tab must have dedicated styling');
+
+console.log(`i18n and dashboard settings checks passed: ${LANGUAGES.length} locales, ${baseKeys.length} keys each, locale mapping, escaping, settings wiring and theme overrides verified.`);
