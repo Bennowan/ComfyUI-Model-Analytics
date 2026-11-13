@@ -23,10 +23,14 @@ I kept accumulating gigabytes of checkpoints, LoRAs, and UNets without knowing i
 
 * **Disk Scan:** Walks through all known model directories on your disk to find files.
 * **Workflow Parser:** Checks your saved workflow JSON files to see which models are referenced.
-* **Live VRAM Tracking:** Hooks into model-loading functions to track what actually gets loaded at runtime, so unrun workflows don't give false positives.
-* **Recency-Based Categorization:** A model counts as "Used" if it's referenced by any saved workflow, *or* if it was loaded within the last 7 days (configurable in the dashboard, and can be turned off entirely so any past load counts no matter how old). No permanent flags — outside of workflow references, a model quietly moves back to "Unused" once it's been idle long enough, and comes back the moment it's loaded again.
+* **Live Tracking:** Hooks into model loading to record what actually gets loaded at runtime, and also notes which models a queued prompt names - so cached models and GGUF loaders are not missed.
+* **Recency-Based Categorization:** A model counts as "Used" if it's referenced by any saved workflow, *or* it was loaded or queued within the last 7 days (configurable in the dashboard, and can be turned off entirely so any past load counts no matter how old). No permanent flags - outside of workflow references, a model quietly moves back to "Unused" once it's been idle long enough, and comes back the moment it's used again.
+* **Extra Model Paths:** Folders declared in `extra_model_paths.yaml` are scanned too, even on another drive. Files ending in `.disabled` get their own tab.
 * **Strictly Read-Only:** It only analyzes data. No files will ever be deleted or modified automatically.
 * **Clean Dashboard:** Adds a neat button to your ComfyUI menu with tabs for used models, dead weight, and workflow breakdowns.
+* **Independent Dashboard Theme:** The dashboard follows ComfyUI by default, but can be switched independently to Dark or Light without changing the surrounding ComfyUI interface.
+* **Multiple Languages:** English, German, Simplified Chinese, Traditional Chinese, Japanese, and Korean are supported. Automatic mode follows ComfyUI's language; a manually selected language stays selected.
+* **In-Dashboard Settings:** Change the language, dashboard theme, size units (GiB/GB), row density, date format, default tab, and GitHub star banner directly in the dashboard Settings tab. Preferences are also registered in **Settings → Model Analytics** and stored by ComfyUI.
 
 ## Installation
 
