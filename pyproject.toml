@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-Model-Analytics"
 description = "Shows which models you actually use vs. which are just wasting disk space. Read-only, no deletion."
-version = "1.1.0"
+version = "1.2.0"
 license = "MIT"
 keywords = [
     "model management",
@@ -14,6 +14,11 @@ keywords = [
     "unused models",
     "dashboard",
     "analytics",
+    "internationalization",
+    "localization",
+    "multilingual",
+    "dashboard-theme",
+    "ui-customization",
 ]
 
 # classifiers = [
