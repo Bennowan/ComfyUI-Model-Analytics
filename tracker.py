@@ -23,7 +23,7 @@ except ImportError:
     folder_paths = None
 
 try:
-    from .scanner import is_excluded_scan_path
+    from .scanner import is_excluded_scan_path, iter_model_strings
 except ImportError:
     # Fallback if scanner.py isn't importable in this context for some
     # reason - keep tracker.py functional (just without the extra
@@ -31,6 +31,18 @@ except ImportError:
     def is_excluded_scan_path(path: Path) -> bool:
         parts = {p.lower() for p in Path(path).parts}
         return bool(parts & {"custom_nodes", ".disabled"})
+
+    _FALLBACK_EXTS = (".safetensors", ".ckpt", ".gguf", ".pt", ".pth", ".sft", ".onnx", ".bin")
+
+    def iter_model_strings(obj):
+        if isinstance(obj, dict):
+            for v in obj.values():
+                yield from iter_model_strings(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                yield from iter_model_strings(v)
+        elif isinstance(obj, str) and obj.lower().endswith(_FALLBACK_EXTS):
+            yield obj
 
 log = logging.getLogger("ModelAnalytics")
 
@@ -207,6 +219,55 @@ def record_model_loaded(model_key: str) -> None:
         _save_history()
 
 
+def record_models_queued(model_keys) -> None:
+    """Register that a prompt referencing these models was queued.
+
+    Complements record_model_loaded(): ComfyUI keeps models in memory and
+    does not reload them when a cached graph runs again, and loaders that
+    bypass comfy.utils.load_torch_file (e.g. GGUF) are never seen by the
+    load hook. A queued prompt that names the model catches both cases.
+    It only shows intent - a prompt can still fail or be cancelled - which
+    is why it is stored in its own fields (last_queued / queue_count)."""
+    keys = {k.replace("\\", "/") for k in model_keys if k}
+    if not keys:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        history = _load_history()
+        for key in keys:
+            entry = history.get(key)
+            if not isinstance(entry, dict):
+                entry = {"use_count": 0, "last_used": None}
+            entry["queue_count"] = entry.get("queue_count", 0) + 1
+            entry["last_queued"] = now
+            history[key] = entry
+        _save_history()
+
+
+def _on_prompt(json_data):
+    """ComfyUI on-prompt handler: record every model file named in the
+    queued prompt, then hand the data back untouched."""
+    try:
+        prompt = json_data.get("prompt") if isinstance(json_data, dict) else None
+        if isinstance(prompt, dict):
+            record_models_queued(iter_model_strings(prompt))
+    except Exception as e:
+        log.debug("Queue tracking failed: %s", e)
+    return json_data
+
+
+def latest_timestamp(*values: Optional[str]) -> Optional[str]:
+    """The most recent of several ISO timestamps (ignoring missing or
+    malformed ones), returned in its original string form."""
+    best_dt = None
+    best_raw = None
+    for raw in values:
+        dt = _parse_last_used(raw)
+        if dt is not None and (best_dt is None or dt > best_dt):
+            best_dt, best_raw = dt, raw
+    return best_raw
+
+
 def get_history() -> Dict[str, Any]:
     with _lock:
         history = _load_history()
@@ -232,6 +293,8 @@ def _migrate_history_entries(history: Dict[str, Any]) -> None:
             continue
         entry.setdefault("use_count", 0)
         entry.setdefault("last_used", None)
+        entry.setdefault("queue_count", 0)
+        entry.setdefault("last_queued", None)
 
 
 def _relativize(full_path: str) -> str:
@@ -239,13 +302,9 @@ def _relativize(full_path: str) -> str:
     used elsewhere (kind/subfolder/file.ext), by matching it against known
     folder_paths roots. Falls back to just the basename.
 
-    Only matches against roots inside the official models/ directory,
-    using the same exclusion rules as scanner.py (no custom_nodes/,
-    .disabled/, etc.) - otherwise a custom node's bundled model getting
-    loaded at runtime could still get written into model_history.json
-    under a relative key, which the API layer could then match back
-    against inventory by basename even after scanner.py itself stops
-    listing the file."""
+    Skips excluded locations (custom_nodes/, .disabled/, etc.) using the
+    same rule as scanner.py, so a custom node's bundled model loaded at
+    runtime is not written into model_history.json under a relative key."""
     if folder_paths is None:
         return Path(full_path).name
     try:
@@ -278,10 +337,10 @@ def install_tracker_hooks() -> None:
     merely when a prompt referencing it is queued. This avoids polluting
     the history with aborted/never-run generations.
 
-    We patch comfy.sd.load_checkpoint_guess_config (used for checkpoints)
-    and comfy.utils.load_torch_file (used for many loaders: LoRA, VAE,
-    UNet, CLIP, ControlNet, etc.) since both ultimately run for a
-    successful load. Patching is done defensively - if ComfyUI's internal
+    We patch comfy.utils.load_torch_file (used by most loaders: checkpoints,
+    LoRA, VAE, UNet, CLIP, ControlNet, ...). Loaders that bypass it (GGUF)
+    and models that stay cached in memory are covered by queue tracking
+    (_on_prompt), which is stored separately. Patching is done defensively - if ComfyUI's internal
     APIs differ from what we expect, we log a warning and simply skip
     live tracking rather than breaking startup.
     """
@@ -309,3 +368,11 @@ def install_tracker_hooks() -> None:
     comfy_utils.load_torch_file = patched_load_torch_file
     comfy_utils._model_analytics_patched = True
     log.info("Model Analytics: live tracking hook installed on comfy.utils.load_torch_file")
+
+    # Queue-time tracking through ComfyUI's official on-prompt handler API.
+    try:
+        from server import PromptServer
+        PromptServer.instance.add_on_prompt_handler(_on_prompt)
+        log.info("Model Analytics: queue tracking registered")
+    except Exception as e:
+        log.warning("Queue tracking not available: %s", e)

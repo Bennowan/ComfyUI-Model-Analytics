@@ -27,7 +27,7 @@ import re
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Set
 
 try:
     import folder_paths
@@ -121,6 +121,86 @@ def _is_excluded_path(path: Path) -> bool:
 is_excluded_scan_path = _is_excluded_path
 
 
+def _extra_config_files() -> List[Path]:
+    """The extra_model_paths config files ComfyUI itself loads: the default
+    extra_model_paths.yaml in the ComfyUI base directory plus anything
+    passed via --extra-model-paths-config."""
+    files: List[Path] = []
+    base = getattr(folder_paths, "base_path", None) if folder_paths is not None else None
+    if base:
+        files.append(Path(base) / "extra_model_paths.yaml")
+    try:
+        from comfy.cli_args import args
+        configured = getattr(args, "extra_model_paths_config", None) or []
+        # argparse "append" + nargs="+" gives a list of lists.
+        for item in configured:
+            for entry in (item if isinstance(item, (list, tuple)) else [item]):
+                files.append(Path(entry))
+    except Exception as e:
+        log.debug("Could not read --extra-model-paths-config: %s", e)
+
+    unique: List[Path] = []
+    for f in files:
+        try:
+            if f.is_file() and f not in unique:
+                unique.append(f)
+        except OSError:
+            continue
+    return unique
+
+
+def _extra_config_roots() -> Set[Path]:
+    """Directories declared in extra_model_paths config files, resolved the
+    same way ComfyUI's load_extra_path_config() does (base_path joined with
+    each listed path; relative paths are relative to the YAML file).
+
+    These are the ONLY directories outside models/ that the scanner accepts,
+    so folders that custom nodes register on their own stay excluded.
+    Entries that cannot be resolved here (e.g. shell-variable paths) are
+    skipped, which just means those directories stay hidden as before."""
+    roots: Set[Path] = set()
+    try:
+        import yaml
+    except ImportError:
+        return roots
+
+    for cfg in _extra_config_files():
+        try:
+            config = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.debug("Could not parse %s: %s", cfg, e)
+            continue
+        if not isinstance(config, dict):
+            continue
+        yaml_dir = cfg.resolve().parent
+        for section in config.values():
+            if not isinstance(section, dict):
+                continue
+            base = None
+            base_path = section.get("base_path")
+            if isinstance(base_path, str) and base_path:
+                base = Path(base_path).expanduser()
+                if not base.is_absolute():
+                    base = yaml_dir / base
+            for key, value in section.items():
+                if key in ("base_path", "is_default") or not isinstance(value, str):
+                    continue
+                for line in value.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    entry = Path(line).expanduser()
+                    if base is not None:
+                        entry = base / entry  # an absolute entry replaces base
+                    elif not entry.is_absolute():
+                        entry = yaml_dir / entry
+                    try:
+                        roots.add(entry.resolve())
+                    except OSError:
+                        continue
+    return roots
+
+
 def _get_model_root_dirs() -> Dict[str, List[Path]]:
     """Ask ComfyUI's folder_paths for every known model directory kind,
     then keep only the ones that actually live inside the real models/
@@ -130,12 +210,17 @@ def _get_model_root_dirs() -> Dict[str, List[Path]]:
     assets recognized in ComfyUI's model dropdowns. Those directories are
     not part of the official models/ hierarchy and must never be scanned
     or shown in this dashboard, even though folder_paths itself makes no
-    distinction between 'official' and 'custom-node-registered' entries."""
+    distinction between 'official' and 'custom-node-registered' entries.
+
+    Exception: directories the user declared in extra_model_paths.yaml
+    (or --extra-model-paths-config) are accepted even when they live
+    outside models/, e.g. on another drive or in a shared A1111 folder."""
     roots: Dict[str, List[Path]] = {}
     if folder_paths is None:
         return roots
 
     base_models_dir = _get_base_models_dir()
+    extra_roots = _extra_config_roots()
 
     known_keys = list(getattr(folder_paths, "folder_names_and_paths", {}).keys())
     for key in known_keys:
@@ -150,7 +235,13 @@ def _get_model_root_dirs() -> Dict[str, List[Path]]:
             if _is_excluded_path(resolved):
                 log.debug("Skipping non-model directory (excluded segment) for kind '%s': %s", key, resolved)
                 continue
-            if base_models_dir != Path() and base_models_dir not in resolved.parents and resolved != base_models_dir:
+            declared_extra = any(resolved == r or r in resolved.parents for r in extra_roots)
+            if (
+                base_models_dir != Path()
+                and base_models_dir not in resolved.parents
+                and resolved != base_models_dir
+                and not declared_extra
+            ):
                 log.debug("Skipping directory outside official models/ root for kind '%s': %s", key, resolved)
                 continue
             kept_dirs.append(Path(d))
@@ -354,15 +445,15 @@ def _get_workflows_dir() -> Path:
     return best
 
 
-def _iter_model_strings(obj: Any):
+def iter_model_strings(obj: Any):
     """Recursively yield every string value in a JSON structure that looks
     like a model filename, regardless of which key/node it's nested under."""
     if isinstance(obj, dict):
         for v in obj.values():
-            yield from _iter_model_strings(v)
+            yield from iter_model_strings(v)
     elif isinstance(obj, list):
         for v in obj:
-            yield from _iter_model_strings(v)
+            yield from iter_model_strings(v)
     elif isinstance(obj, str):
         if obj.lower().endswith(MODEL_EXTENSIONS):
             yield obj
@@ -429,14 +520,14 @@ def scan_workflows() -> Dict[str, List[str]]:
             continue
 
         try:
-            for model_str in _iter_model_strings(data):
+            for model_str in iter_model_strings(data):
                 # Normalize slashes so "unet\\foo.gguf" and "unet/foo.gguf" match.
                 normalized = model_str.replace("\\", "/")
                 mapping.setdefault(normalized, [])
                 if rel_name not in mapping[normalized]:
                     mapping[normalized].append(rel_name)
         except Exception as e:
-            # _iter_model_strings recurses through arbitrary user-authored
+            # iter_model_strings recurses through arbitrary user-authored
             # JSON; guard against unexpected shapes (e.g. extremely deep
             # nesting hitting Python's recursion limit).
             log.warning("Skipping model references from workflow %s due to unexpected error: %s", rel_name, e)

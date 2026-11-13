@@ -4,13 +4,15 @@ Registers a single read-only aiohttp endpoint that the frontend polls to
 render the dashboard. No mutation endpoints exist by design.
 
 Categorization note:
-A model is "Used" if EITHER of the following holds, evaluated fresh on
+A model is "Used" if ANY of the following holds, evaluated fresh on
 every request (no permanent "used" flag is ever stored):
   1. It was loaded recently enough (tracker.py's last_used timestamp,
      checked via tracker.is_recently_used()).
-  2. It is referenced by at least one saved workflow file, per
+  2. A prompt naming it was queued recently enough (last_queued) - this
+     covers cached models and loaders the load hook cannot see (GGUF).
+  3. It is referenced by at least one saved workflow file, per
      scanner.scan_workflows() - regardless of when that workflow last ran.
-A model is "Unused" only when BOTH are false.
+A model is "Unused" only when ALL of these are false.
 
 The recency window (criterion 1) is configurable per request via the
 `used_threshold_days` query param and can be disabled entirely ("off"),
@@ -22,7 +24,7 @@ import logging
 from aiohttp import web
 
 from .scanner import scan_disk_models, scan_workflows, list_workflow_names, get_workflows_dir_debug_info
-from .tracker import get_history, is_recently_used, get_used_threshold_days
+from .tracker import get_history, is_recently_used, get_used_threshold_days, latest_timestamp
 
 log = logging.getLogger("ModelAnalytics")
 
@@ -155,6 +157,9 @@ def _build_inventory(threshold_days: float = None) -> dict:
                     "workflow_match": None,
                     "use_count": 0,
                     "last_used": None,
+                    "queue_count": 0,
+                    "last_queued": None,
+                    "last_activity": None,
                     "unused": False,
                     "disabled": True,
                     "used_reason": None,
@@ -175,6 +180,8 @@ def _build_inventory(threshold_days: float = None) -> dict:
 
             last_used_iso = hist_entry.get("last_used") if hist_entry else None
             use_count = hist_entry.get("use_count", 0) if hist_entry else 0
+            last_queued_iso = hist_entry.get("last_queued") if hist_entry else None
+            queue_count = hist_entry.get("queue_count", 0) if hist_entry else 0
 
             # Recalculated fresh every request - never from a persisted flag.
             # Either signal is enough to keep a model out of "Unused":
@@ -182,15 +189,17 @@ def _build_inventory(threshold_days: float = None) -> dict:
             #     loaded, if the recency window is disabled).
             #   - referenced: a saved workflow currently mentions this file.
             recently_used = is_recently_used(last_used_iso, threshold_days)
+            recently_queued = is_recently_used(last_queued_iso, threshold_days)
             referenced = bool(referenced_in)
-            is_unused = not (recently_used or referenced)
-            used_reason = None
-            if recently_used and referenced:
-                used_reason = "recent_load_and_workflow"
-            elif recently_used:
-                used_reason = "recent_load"
-            elif referenced:
-                used_reason = "workflow_reference"
+            is_unused = not (recently_used or recently_queued or referenced)
+            reasons = []
+            if recently_used:
+                reasons.append("recent_load")
+            if recently_queued:
+                reasons.append("recent_queue")
+            if referenced:
+                reasons.append("workflow_reference")
+            used_reason = "+".join(reasons) or None
 
             size_bytes = model.get("size_bytes", 0) or 0
             if is_unused:
@@ -204,6 +213,9 @@ def _build_inventory(threshold_days: float = None) -> dict:
                 "workflow_match": workflow_match,
                 "use_count": use_count,
                 "last_used": last_used_iso,
+                "queue_count": queue_count,
+                "last_queued": last_queued_iso,
+                "last_activity": latest_timestamp(last_used_iso, last_queued_iso),
                 "unused": is_unused,
                 "disabled": False,
                 "used_reason": used_reason,
