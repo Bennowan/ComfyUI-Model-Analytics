@@ -84,4 +84,12 @@ export default {
   'settings.theme.light': '밝게',
   'settings.panel.description': '대시보드를 사용자 지정합니다. 변경 사항은 ComfyUI 설정에 저장되며 즉시 적용됩니다.',
   'settings.saveError': 'ComfyUI에 이 설정을 저장하지 못했습니다. 설정 API를 사용할 수 있는지 확인하세요.',
+
+  // Used / unused classification and entry points
+  "action.open": "Model Analytics 열기",
+  "settings.group.recency": "'사용 중' / '사용하지 않음' 판정",
+  "settings.recency.enabled.name": "'사용 중'을 최근 기간으로 제한",
+  "settings.recency.enabled.tooltip": "켜짐: 아래 일수 이내에 로드되거나 대기열에 추가된 모델만 '사용 중'으로 간주합니다. 꺼짐: 아무리 오래전이라도 과거의 모든 로드·대기열 추가가 포함됩니다.",
+  "settings.recency.days.name": "기간(일)",
+  "settings.recency.days.tooltip": "로드되거나 대기열에 추가된 모델을 '사용 중'으로 간주하는 일수입니다. 저장된 워크플로우에서 참조되는 모델은 항상 '사용 중'입니다.",
 };

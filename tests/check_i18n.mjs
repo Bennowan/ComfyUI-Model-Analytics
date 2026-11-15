@@ -51,6 +51,9 @@ for (const key of [
   'reason.recent_load', 'reason.recent_queue', 'reason.workflow_reference',
   'used.empty.window', 'used.empty.all', 'used.summary.window', 'used.summary.all',
   'unused.summary.window', 'unused.summary.all',
+  'action.open', 'settings.group.recency',
+  'settings.recency.enabled.name', 'settings.recency.enabled.tooltip',
+  'settings.recency.days.name', 'settings.recency.days.tooltip',
 ]) {
   assert.ok(key in base, `dynamic translation key must exist: ${key}`);
 }
@@ -91,5 +94,48 @@ const css = fs.readFileSync(path.join(projectRoot, 'web/css/style.css'), 'utf8')
 assert.ok(css.includes('.ma-overlay[data-ma-theme="dark"]'), 'dark dashboard override must exist');
 assert.ok(css.includes('.ma-overlay[data-ma-theme="light"]'), 'light dashboard override must exist');
 assert.ok(css.includes('.ma-settings-page'), 'settings tab must have dedicated styling');
+
+
+// Entry points: new ComfyUI menu (Extensions menu + action bar) plus the
+// legacy-menu fallback button.
+assert.ok(mainSource.includes('menuCommands: ['), 'menu entry must be registered');
+assert.ok(mainSource.includes('path: ["Extensions"]'), 'menu entry must live under Extensions');
+assert.ok(mainSource.includes('actionBarButtons,'), 'action bar button must be registered');
+assert.ok(mainSource.includes('function addLegacyMenuButton()'), 'legacy menu fallback button must exist');
+
+// Recency window lives in the ComfyUI settings; localStorage is only read
+// (and cleared) once for the migration, never written.
+assert.ok(mainSource.includes('ModelAnalytics.RecencyEnabled') && mainSource.includes('ModelAnalytics.RecencyDays'), 'recency settings must be registered');
+assert.ok(mainSource.includes('migrateLegacyLocalPreferences'), 'legacy localStorage migration must exist');
+assert.ok(!/localStorage\.setItem/.test(mainSource), 'main.js must not write to localStorage');
+
+// Language: a manual choice is only ever written by the user's own action.
+assert.ok(!/writeSetting\(\s*SETTING\.language/.test(mainSource), 'the language setting must never be written automatically');
+
+// Read-only by design: no delete/remove functionality anywhere in the frontend.
+const sourcesToScan = [mainSource, fs.readFileSync(path.join(projectRoot, 'web/js/i18n/index.js'), 'utf8')];
+for (const source of sourcesToScan) {
+  assert.ok(!/method:\s*['"](DELETE|POST|PUT|PATCH)['"]/i.test(source), 'frontend must only issue read requests');
+  assert.ok(!/\bunlink\b|\brmtree\b|\bremoveFile\b|deleteModel/i.test(source), 'no delete functionality allowed');
+}
+for (const [code, messages] of LANGUAGES.map((l) => [l.code, l.messages])) {
+  for (const [key, value] of Object.entries(messages)) {
+    assert.ok(!/\b(delete|trash)\b|löschen|删除|刪除|削除|삭제/i.test(value), `${code}.${key}: no delete wording in the UI text`);
+  }
+}
+
+// Python side: no environment variable access, no deletion, no network or
+// process access (keeps the scanner-compatibility fixes intact).
+for (const file of ['__init__.py', 'api_server.py', 'scanner.py', 'tracker.py']) {
+  const py = fs.readFileSync(path.join(projectRoot, file), 'utf8');
+  assert.ok(!/os\.environ|getenv|environ\[/.test(py), `${file}: must not read environment variables`);
+  assert.ok(!/subprocess|os\.system|shutil\.rmtree|os\.remove|os\.unlink|\.unlink\(|rmdir|eval\(|exec\(/.test(py), `${file}: no process or delete calls allowed`);
+}
+
+// Styles: semantic tokens only, no hard-coded colour palette.
+assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), 'style.css must not contain hex colour values');
+assert.ok(css.includes('--ma-accent-text'), 'readable accent text token must exist');
+assert.ok(css.includes('CanvasText') && css.includes('AccentColor'), 'explicit themes must use CSS system colours');
+assert.ok(!css.includes('--primary-foreground') && !css.includes('var(--success'), 'tokens that ComfyUI does not define must not be referenced');
 
 console.log(`i18n and dashboard settings checks passed: ${LANGUAGES.length} locales, ${baseKeys.length} keys each, locale mapping, escaping, settings wiring and theme overrides verified.`);

@@ -84,4 +84,12 @@ export default {
   'settings.theme.light': 'ライト',
   'settings.panel.description': 'ダッシュボードをカスタマイズします。変更は ComfyUI の設定に保存され、すぐに反映されます。',
   'settings.saveError': 'この設定を ComfyUI に保存できませんでした。設定 API が利用可能か確認してください。',
+
+  // Used / unused classification and entry points
+  "action.open": "Model Analytics を開く",
+  "settings.group.recency": "「使用中」/「未使用」の判定",
+  "settings.recency.enabled.name": "「使用中」を直近の期間に限定する",
+  "settings.recency.enabled.tooltip": "オン: 下の日数以内にロードまたはキュー投入されたモデルを「使用中」と見なします。オフ: 過去のロードやキュー投入は、どんなに古くてもすべて対象になります。",
+  "settings.recency.days.name": "期間（日数）",
+  "settings.recency.days.tooltip": "ロードまたはキュー投入されたモデルを「使用中」と見なす日数です。保存済みワークフローで参照されているモデルは常に「使用中」です。",
 };

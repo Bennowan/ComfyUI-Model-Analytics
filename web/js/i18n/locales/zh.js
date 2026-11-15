@@ -84,4 +84,12 @@ export default {
   'settings.theme.light': '浅色',
   'settings.panel.description': '自定义仪表板。更改会保存在 ComfyUI 设置中并立即生效。',
   'settings.saveError': '无法在 ComfyUI 中保存此设置。请检查设置接口是否可用。',
+
+  // Used / unused classification and entry points
+  "action.open": "打开 Model Analytics",
+  "settings.group.recency": "“已使用”/“未使用”判定",
+  "settings.recency.enabled.name": "将“已使用”限定在最近时间范围内",
+  "settings.recency.enabled.tooltip": "开启：模型在下方天数内被加载或排队过，才视为“已使用”。关闭：任何曾经的加载或排队都会计入，无论多久以前。",
+  "settings.recency.days.name": "时间范围（天）",
+  "settings.recency.days.tooltip": "已加载或已排队的模型在多少天内仍视为“已使用”。被已保存工作流引用的模型始终视为“已使用”。",
 };

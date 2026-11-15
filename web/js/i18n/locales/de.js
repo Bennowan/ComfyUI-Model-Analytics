@@ -84,4 +84,12 @@ export default {
   'settings.theme.light': 'Hell',
   'settings.panel.description': 'Passe das Dashboard an. Änderungen werden in den ComfyUI-Einstellungen gespeichert und sofort übernommen.',
   'settings.saveError': 'Diese Einstellung konnte nicht in ComfyUI gespeichert werden. Bitte prüfe, ob die Settings-Schnittstelle verfügbar ist.',
+
+  // Used / unused classification and entry points
+  "action.open": "Model Analytics öffnen",
+  "settings.group.recency": "Einstufung „Verwendet“ / „Ungenutzt“",
+  "settings.recency.enabled.name": "„Verwendet“ auf einen Zeitraum begrenzen",
+  "settings.recency.enabled.tooltip": "An: Ein Modell gilt als verwendet, wenn es innerhalb des Zeitraums unten geladen oder eingereiht wurde. Aus: Jeder frühere Ladevorgang zählt, egal wie lange er her ist.",
+  "settings.recency.days.name": "Zeitraum (Tage)",
+  "settings.recency.days.tooltip": "Wie viele Tage ein geladenes oder eingereihtes Modell noch als verwendet gilt. Modelle, die in einem gespeicherten Workflow vorkommen, gelten immer als verwendet.",
 };

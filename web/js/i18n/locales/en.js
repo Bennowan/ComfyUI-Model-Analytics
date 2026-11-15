@@ -85,4 +85,12 @@ export default {
   'settings.theme.light': 'Light',
   'settings.panel.description': 'Customize the dashboard. Changes are saved in ComfyUI settings and apply immediately.',
   'settings.saveError': 'Could not save this setting in ComfyUI. Please check whether the settings API is available.',
+
+  // Used / unused classification and entry points
+  "action.open": "Open Model Analytics",
+  "settings.group.recency": "Used / unused classification",
+  "settings.recency.enabled.name": "Limit \"Used\" to a recent time window",
+  "settings.recency.enabled.tooltip": "On: a model counts as Used if it was loaded or queued within the window below. Off: any past load or queue counts, no matter how long ago.",
+  "settings.recency.days.name": "Recency window (days)",
+  "settings.recency.days.tooltip": "How many days a loaded or queued model still counts as Used. Models referenced by a saved workflow always count as Used.",
 };
