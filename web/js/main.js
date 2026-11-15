@@ -1227,6 +1227,8 @@ function updateActionBarButtons() {
   for (const button of actionBarButtons) {
     button.label = tr.t("app.menuButton");
     button.tooltip = tr.t("action.open");
+    // Keep the visual button class when labels are refreshed after a language change.
+    button.class = "ma-actionbar-button";
   }
 }
 
@@ -1440,6 +1442,7 @@ if (!legacyMenuInUse()) {
     icon: "pi pi-chart-bar",
     label: t("app.menuButton"),
     tooltip: t("action.open"),
+    class: "ma-actionbar-button",
     onClick: openDashboard,
   });
 }

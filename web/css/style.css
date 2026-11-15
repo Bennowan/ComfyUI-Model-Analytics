@@ -8,7 +8,8 @@
 
 .ma-scope,
 .ma-menu-btn,
-.ma-floating-btn {
+.ma-floating-btn,
+.ma-actionbar-button {
   /* Model Analytics tokens resolve from the selected ComfyUI palette first.
      The optional Custom Appearance values only override this local layer. */
   --ma-bg: var(--ma-custom-bg, var(--comfy-menu-bg, var(--background, var(--bg-color, Canvas))));
@@ -38,7 +39,8 @@
 @supports (color: oklch(from red l c h)) {
   .ma-scope,
   .ma-menu-btn,
-  .ma-floating-btn {
+  .ma-floating-btn,
+  .ma-actionbar-button {
     --ma-accent-fg-auto: oklch(from var(--ma-accent) clamp(0, (l - 0.6) * -1000, 1) 0 0);
   }
 }
@@ -463,6 +465,54 @@ table.ma-table tbody tr:hover {
   outline: none;
   box-shadow: 0 0 0 3px var(--ma-accent-soft), 0 0 0 1px var(--ma-accent);
 }
+
+/* ComfyUI's modern action-bar button. The frontend supports a custom
+   `class` on ActionBarButton definitions; use it to give this entry a real,
+   visible button surface instead of the default low-emphasis text treatment. */
+button.ma-actionbar-button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  min-height: 34px !important;
+  padding: 7px 13px !important;
+  margin: 3px 5px !important;
+  border: 1px solid color-mix(in srgb, var(--ma-accent) 72%, var(--ma-border)) !important;
+  border-radius: 9px !important;
+  background: color-mix(in srgb, var(--ma-accent) 18%, var(--ma-surface)) !important;
+  color: var(--ma-fg) !important;
+  font: inherit !important;
+  font-size: 12.5px !important;
+  font-weight: 650 !important;
+  line-height: 1.2 !important;
+  letter-spacing: .01em !important;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .07), 0 1px 3px rgb(0 0 0 / .14) !important;
+  cursor: pointer !important;
+  transition: background-color .15s ease, border-color .15s ease,
+    box-shadow .15s ease, color .15s ease, transform .05s ease !important;
+}
+button.ma-actionbar-button > i,
+button.ma-actionbar-button > .pi {
+  display: inline-block;
+  color: var(--ma-accent);
+  font-size: 14px;
+  line-height: 1;
+}
+button.ma-actionbar-button:hover {
+  background: color-mix(in srgb, var(--ma-accent) 28%, var(--ma-surface)) !important;
+  border-color: var(--ma-accent) !important;
+  color: var(--ma-fg) !important;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .09), 0 2px 7px rgb(0 0 0 / .2) !important;
+}
+button.ma-actionbar-button:active {
+  background: color-mix(in srgb, var(--ma-accent) 36%, var(--ma-surface)) !important;
+  transform: translateY(1px) !important;
+}
+button.ma-actionbar-button:focus-visible {
+  outline: 2px solid var(--ma-accent) !important;
+  outline-offset: 2px !important;
+}
+
 
 /* Fallback button used only when no ComfyUI menu container is available. */
 .ma-floating-btn {
