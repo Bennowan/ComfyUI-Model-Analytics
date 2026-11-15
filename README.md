@@ -27,10 +27,10 @@ I kept accumulating gigabytes of checkpoints, LoRAs, and UNets without knowing i
 * **Recency-Based Categorization:** A model counts as "Used" if it's referenced by any saved workflow, *or* it was loaded or queued within the last 7 days (configurable in the dashboard, and can be turned off entirely so any past load counts no matter how old). No permanent flags - outside of workflow references, a model quietly moves back to "Unused" once it's been idle long enough, and comes back the moment it's used again.
 * **Extra Model Paths:** Folders declared in `extra_model_paths.yaml` are scanned too, even on another drive. Files ending in `.disabled` get their own tab.
 * **Strictly Read-Only:** It only analyzes data. No files will ever be deleted or modified automatically.
-* **Clean Dashboard:** Opens from the **Extensions** menu or from a button in ComfyUI's top action bar (legacy menu: a button in the menu). Tabs for used models, dead weight, disabled files, workflow breakdowns, and settings.
-* **Theme-Aware Design:** The dashboard uses ComfyUI's own design tokens, so it matches Dark, Light and every other ComfyUI theme. It can also be switched independently to Dark or Light (built from CSS system colours, no hard-coded palette) without changing the surrounding ComfyUI interface.
+* **Clean Dashboard:** Opens from one clearly placed entry point: a styled button in ComfyUI's legacy menu, or the native action-bar button when the modern menu is enabled. The extension avoids registering duplicate visible entries. Tabs for used models, unused models, disabled files, workflow breakdowns, and settings.
+* **Theme-Aware Design:** The dashboard follows ComfyUI by default. You can also select a palette from ComfyUI's palette registry for the dashboard only, or use the optional advanced appearance editor. Palette colours are read from ComfyUI's theme definitions and applied locally; the global interface and workflow canvas are not changed.
 * **Multiple Languages:** English, German, Simplified Chinese, Traditional Chinese, Japanese, and Korean are supported. Automatic mode follows ComfyUI's language; a manually selected language stays selected.
-* **In-Dashboard Settings:** Change the language, dashboard theme, used/unused time window, size units (GiB/GB), row density, date format, default tab, and GitHub star banner directly in the dashboard Settings tab. Every preference is also registered in **Settings → Model Analytics** and stored by ComfyUI, so it survives restarts. The time window used to live in the browser's localStorage; an existing value is carried over once automatically.
+* **In-Dashboard Settings:** Change the language, appearance, used/unused time window, size units (GiB/GB), row density, date format, and default tab directly in the dashboard Settings tab. Preferences are stored by ComfyUI. The GitHub star banner appears on first install and can be dismissed permanently with its close button.
 
 ## Installation
 
@@ -46,7 +46,7 @@ cd ComfyUI/custom_nodes/
 git clone https://github.com/Bennowan/ComfyUI-Model-Analytics.git
 ```
 
-3. Restart ComfyUI and open **Extensions → Model Analytics** (or click the chart button in the top action bar).
+3. Restart ComfyUI and use the single Model Analytics entry point: the native action-bar button when the modern ComfyUI menu is enabled, or the styled menu button in legacy-menu mode.
 
 ## Support
 
