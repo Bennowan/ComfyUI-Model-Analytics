@@ -88,20 +88,29 @@ assert.ok(!marked.includes('<img'));
 
 assert.ok(mainSource.includes('const DATA_TABS = ["used", "unused", "disabled", "workflow"]'), 'settings tab must not become a data default tab');
 assert.ok(mainSource.includes('this.activeTab === "settings"'), 'dashboard must render its in-dashboard settings tab');
-assert.ok(mainSource.includes('this.attachSettingsHandlers(overlay.querySelector(".ma-body"))'), 'settings controls must use a persistent delegated handler');
-assert.ok(mainSource.includes('ModelAnalytics.Theme'), 'dashboard theme must be a persisted ComfyUI setting');
+assert.ok(mainSource.includes('this.attachSettingsHandlers(body)'), 'settings controls must use a persistent delegated handler');
+assert.ok(mainSource.includes('ModelAnalytics.Appearance'), 'dashboard appearance preference must be persisted');
 const css = fs.readFileSync(path.join(projectRoot, 'web/css/style.css'), 'utf8');
-assert.ok(css.includes('.ma-overlay[data-ma-theme="dark"]'), 'dark dashboard override must exist');
-assert.ok(css.includes('.ma-overlay[data-ma-theme="light"]'), 'light dashboard override must exist');
+assert.ok(css.includes('.ma-theme-grid'), 'ComfyUI palette choices must have a dedicated picker');
+assert.ok(css.includes('--ma-custom-bg'), 'custom appearance must be scoped to the dashboard');
 assert.ok(css.includes('.ma-settings-page'), 'settings tab must have dedicated styling');
+assert.ok(css.includes('.ma-body.ma-body-settings') && css.includes('width: 100%') && css.includes('height: 100%'), 'settings page and its scrollbar must occupy the full modal content width and height');
+assert.ok(mainSource.includes('cache: "no-store"'), 'inventory refresh must bypass browser caching');
+assert.ok(mainSource.includes('"execution_start", "execution_success"'), 'inventory must refresh when execution starts and finishes');
+assert.ok(mainSource.includes('id: SETTING.starBannerDismissed') && mainSource.includes('type: "hidden"'), 'star banner dismissal must not be a visible toggle');
+assert.ok(mainSource.includes('starBanner: readSetting(SETTING.starBannerDismissed, false) !== true'), 'star banner must be shown by default on first install');
+assert.ok(mainSource.includes('ma-menu-btn-icon'), 'legacy Model Analytics menu button must use its custom icon treatment');
 
 
-// Entry points: new ComfyUI menu (Extensions menu + action bar) plus the
-// legacy-menu fallback button.
-assert.ok(mainSource.includes('menuCommands: ['), 'menu entry must be registered');
-assert.ok(mainSource.includes('path: ["Extensions"]'), 'menu entry must live under Extensions');
-assert.ok(mainSource.includes('actionBarButtons,'), 'action bar button must be registered');
-assert.ok(mainSource.includes('function addLegacyMenuButton()'), 'legacy menu fallback button must exist');
+// Exactly one visible Model Analytics entry is registered per ComfyUI menu
+// mode. The legacy menu uses the styled button; modern mode uses action bar.
+assert.ok(mainSource.includes('optionsHtml(options, value)'), 'appearance select renderer must exist on the dashboard');
+assert.ok(mainSource.includes('if (!legacyMenuInUse())'), 'modern action bar entry must be gated to modern menu mode');
+assert.ok(mainSource.includes('if (legacyMenuInUse()) addLegacyMenuButton();'), 'legacy button must be gated to legacy menu mode');
+assert.ok(mainSource.includes('actionBarButtons,'), 'modern action bar button must be registered');
+assert.ok(mainSource.includes('function addLegacyMenuButton()'), 'legacy menu button must exist');
+assert.ok(!mainSource.includes('menuCommands: ['), 'Extensions menu command must not create a duplicate visible entry');
+assert.ok(mainSource.includes("[data-ma-menu-button='true']"), 'legacy button setup must remove stale duplicate instances');
 
 // Recency window lives in the ComfyUI settings; localStorage is only read
 // (and cleared) once for the migration, never written.
@@ -138,4 +147,4 @@ assert.ok(css.includes('--ma-accent-text'), 'readable accent text token must exi
 assert.ok(css.includes('CanvasText') && css.includes('AccentColor'), 'explicit themes must use CSS system colours');
 assert.ok(!css.includes('--primary-foreground') && !css.includes('var(--success'), 'tokens that ComfyUI does not define must not be referenced');
 
-console.log(`i18n and dashboard settings checks passed: ${LANGUAGES.length} locales, ${baseKeys.length} keys each, locale mapping, escaping, settings wiring and theme overrides verified.`);
+console.log(`i18n and dashboard checks passed: ${LANGUAGES.length} locales, ${baseKeys.length} keys each, locale mapping, escaping, settings, layout, inventory refresh and appearance wiring verified.`);
