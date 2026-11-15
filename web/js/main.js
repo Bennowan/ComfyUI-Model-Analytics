@@ -15,17 +15,19 @@ import {
 // (main.js itself is loaded by ComfyUI's own extension loader - if you
 // don't see JS changes after an update, hard-refresh the browser tab,
 // e.g. Ctrl+Shift+R / Cmd+Shift+R, or disable cache in devtools.)
-const EXT_VERSION = "10";
+const EXT_VERSION = "11";
 
 const GITHUB_REPO_URL = "https://github.com/Bennowan/ComfyUI-Model-Analytics";
 
 const CSS_HREF = `${new URL("../css/style.css", import.meta.url).href}?v=${EXT_VERSION}`;
 
-// Pre-1.2 builds remembered a dismissed star banner in localStorage. It is
-// only read once, to carry that choice over into the ComfyUI setting.
+// Older builds kept a few preferences in the browser's localStorage. They
+// are only read once at startup, to carry the values over into the ComfyUI
+// settings (and are then removed), so existing choices are not lost.
 const LEGACY_STAR_BANNER_DISMISSED_KEY = "ma_star_banner_dismissed";
-const USED_THRESHOLD_ENABLED_KEY = "ma_used_threshold_enabled";
-const USED_THRESHOLD_DAYS_KEY = "ma_used_threshold_days";
+const LEGACY_USED_THRESHOLD_ENABLED_KEY = "ma_used_threshold_enabled";
+const LEGACY_USED_THRESHOLD_DAYS_KEY = "ma_used_threshold_days";
+const DEFAULT_RECENCY_DAYS = 7;
 
 // ---------------------------------------------------------------------
 // Settings (stored by ComfyUI's own settings system, so they are
@@ -41,8 +43,13 @@ const SETTING = {
   defaultTab: "ModelAnalytics.DefaultTab",
   starBanner: "ModelAnalytics.ShowStarBanner",
   theme: "ModelAnalytics.Theme",
+  recencyEnabled: "ModelAnalytics.RecencyEnabled",
+  recencyDays: "ModelAnalytics.RecencyDays",
 };
 const COMFY_LOCALE_SETTING = "Comfy.Locale";
+// "Disabled" means ComfyUI shows its legacy floating menu instead of the
+// new top menu / action bar.
+const COMFY_MENU_SETTING = "Comfy.UseNewMenu";
 
 const LANGUAGE_AUTO = "auto";
 const DATA_TABS = ["used", "unused", "disabled", "workflow"];
@@ -103,6 +110,20 @@ function resolveLanguage() {
   return mapComfyLocale(readSetting(COMFY_LOCALE_SETTING, FALLBACK_LANGUAGE));
 }
 
+// Recency window: whether "Used" is limited to the last N days, and N.
+function readRecency() {
+  const days = Number(readSetting(SETTING.recencyDays, DEFAULT_RECENCY_DAYS));
+  return {
+    enabled: readSetting(SETTING.recencyEnabled, true) !== false,
+    days: Number.isFinite(days) && days > 0 ? days : DEFAULT_RECENCY_DAYS,
+  };
+}
+
+function legacyMenuInUse() {
+  const mode = readSetting(COMFY_MENU_SETTING, undefined);
+  return mode === undefined || mode === "Disabled";
+}
+
 function currentSettings() {
   return {
     sizeUnit: readChoice(SETTING.sizeUnit, SIZE_UNITS, "binary"),
@@ -129,6 +150,11 @@ function parseColorToRgb(value) {
 }
 
 function applyColorScheme(overlay) {
+  // Explicit Dark/Light set their own colour-scheme in style.css.
+  if (overlay.dataset.maTheme !== "auto") {
+    overlay.style.colorScheme = "";
+    return;
+  }
   try {
     const probe = document.createElement("div");
     probe.style.cssText = "position:absolute;width:0;height:0;visibility:hidden;background-color:var(--ma-bg);";
@@ -204,19 +230,12 @@ class ModelAnalyticsDashboard {
     this.selectedWorkflow = null;
     this.overlay = null;
     this.themeObserver = null;
-    this.usedThresholdDays = 7;
+    this.usedThresholdDays = DEFAULT_RECENCY_DAYS;
     // Whether the "Used within last N days" window applies at all. When
     // off, any past load (or a workflow reference) counts as used.
+    // Both values live in the ComfyUI settings (see loadSettings()).
     this.usedThresholdEnabled = true;
     this.loadSettings();
-    try {
-      const stored = localStorage.getItem(USED_THRESHOLD_ENABLED_KEY);
-      if (stored !== null) this.usedThresholdEnabled = stored === "1";
-      const storedDays = parseFloat(localStorage.getItem(USED_THRESHOLD_DAYS_KEY));
-      if (Number.isFinite(storedDays) && storedDays > 0) this.usedThresholdDays = storedDays;
-    } catch {
-      // localStorage can throw (private browsing etc.) - keep the default.
-    }
   }
 
   // Re-reads language + display settings. Called whenever the dashboard
@@ -224,6 +243,9 @@ class ModelAnalyticsDashboard {
   loadSettings() {
     this.tr = createTranslator(resolveLanguage());
     this.settings = currentSettings();
+    const recency = readRecency();
+    this.usedThresholdEnabled = recency.enabled;
+    this.usedThresholdDays = recency.days;
   }
 
   t(key, params) {
@@ -254,11 +276,48 @@ class ModelAnalyticsDashboard {
   // Called by the ComfyUI settings system when one of our settings
   // changes while the dashboard is open.
   onSettingsChanged() {
+    // The recency window has its own handler (it needs fresh server data
+    // and must not rebuild the header while someone is typing in it).
+    const recency = { enabled: this.usedThresholdEnabled, days: this.usedThresholdDays };
     this.loadSettings();
+    this.usedThresholdEnabled = recency.enabled;
+    this.usedThresholdDays = recency.days;
     if (!this.overlay) return;
     this.close();
     this.buildModal();
     if (this.data) this.render();
+  }
+
+  // Applies a new recency window (from the header, the Settings tab or
+  // ComfyUI's own settings dialog) and reloads the data. Does nothing if
+  // the dashboard already uses these values, so a change that arrives
+  // through several paths only triggers one reload.
+  async applyRecency(enabled, days) {
+    if (enabled === this.usedThresholdEnabled && days === this.usedThresholdDays) return;
+    this.usedThresholdEnabled = enabled;
+    this.usedThresholdDays = days;
+    if (!this.overlay) return;
+    const toggle = this.overlay.querySelector(".ma-stale-toggle");
+    const input = this.overlay.querySelector(".ma-stale-input");
+    if (toggle) toggle.checked = enabled;
+    if (input) {
+      input.value = String(days);
+      input.disabled = !enabled;
+    }
+    const settingsRoot = this.overlay.querySelector(".ma-body");
+    const settingsDays = settingsRoot?.querySelector(`[data-setting="${SETTING.recencyDays}"]`);
+    if (settingsDays) settingsDays.disabled = !enabled;
+    if (this.activeTab !== "settings") {
+      const body = this.overlay.querySelector(".ma-body");
+      body.innerHTML = `<div class="ma-summary">${this.h("common.loading")}</div>`;
+    }
+    await this.refresh();
+  }
+
+  // Called when a recency setting changed outside the dashboard.
+  onRecencyChanged() {
+    const recency = readRecency();
+    return this.applyRecency(recency.enabled, recency.days);
   }
 
   buildModal() {
@@ -326,31 +385,21 @@ class ModelAnalyticsDashboard {
     const staleInput = overlay.querySelector(".ma-stale-input");
     staleInput.addEventListener("change", async () => {
       const val = parseFloat(staleInput.value);
-      if (!isNaN(val) && val > 0) {
-        this.usedThresholdDays = val;
-        try {
-          localStorage.setItem(USED_THRESHOLD_DAYS_KEY, String(val));
-        } catch {
-          // Non-fatal - the value just won't survive reopening.
-        }
-        const body = overlay.querySelector(".ma-body");
-        body.innerHTML = `<div class="ma-summary">${this.h("common.loading")}</div>`;
-        await this.refresh();
+      if (!Number.isFinite(val) || val <= 0) {
+        staleInput.value = String(this.usedThresholdDays);
+        return;
       }
+      // Persist in ComfyUI's settings first; applyRecency() is a no-op when
+      // the settings onChange callback already applied the value.
+      await writeSetting(SETTING.recencyDays, val);
+      await this.applyRecency(this.usedThresholdEnabled, val);
     });
 
     const staleToggle = overlay.querySelector(".ma-stale-toggle");
     staleToggle.addEventListener("change", async () => {
-      this.usedThresholdEnabled = staleToggle.checked;
-      staleInput.disabled = !this.usedThresholdEnabled;
-      try {
-        localStorage.setItem(USED_THRESHOLD_ENABLED_KEY, this.usedThresholdEnabled ? "1" : "0");
-      } catch {
-        // Non-fatal - the preference just won't survive reopening.
-      }
-      const body = overlay.querySelector(".ma-body");
-      body.innerHTML = `<div class="ma-summary">${this.h("common.loading")}</div>`;
-      await this.refresh();
+      const enabled = staleToggle.checked;
+      await writeSetting(SETTING.recencyEnabled, enabled);
+      await this.applyRecency(enabled, this.usedThresholdDays);
     });
 
     document.body.appendChild(overlay);
@@ -374,14 +423,6 @@ class ModelAnalyticsDashboard {
       const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(thresholdParam)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this.data = await res.json();
-      // When the filter is off the server sends null - keep the last typed
-      // number so it is ready when the filter is re-enabled.
-      if (typeof this.data.used_threshold_days === "number") {
-        this.usedThresholdDays = this.data.used_threshold_days;
-      }
-      if (typeof this.data.used_threshold_enabled === "boolean") {
-        this.usedThresholdEnabled = this.data.used_threshold_enabled;
-      }
     } catch (e) {
       const body = this.overlay?.querySelector(".ma-body");
       if (body) {
@@ -468,6 +509,30 @@ class ModelAnalyticsDashboard {
     `;
   }
 
+  renderSettingToggle(id, titleKey, tooltipKey, checked) {
+    return `
+      <label class="ma-setting-row ma-setting-toggle-row">
+        <span class="ma-setting-copy">
+          <span class="ma-setting-title">${this.h(titleKey)}</span>
+          <span class="ma-setting-description">${this.h(tooltipKey)}</span>
+        </span>
+        <input class="ma-settings-checkbox" type="checkbox" data-setting="${escapeHtml(id)}" ${checked ? "checked" : ""} aria-label="${this.h(titleKey)}" />
+      </label>
+    `;
+  }
+
+  renderSettingNumber(id, titleKey, tooltipKey, value, disabled) {
+    return `
+      <label class="ma-setting-row">
+        <span class="ma-setting-copy">
+          <span class="ma-setting-title">${this.h(titleKey)}</span>
+          <span class="ma-setting-description">${this.h(tooltipKey)}</span>
+        </span>
+        <input class="ma-settings-number" type="number" min="1" step="1" data-setting="${escapeHtml(id)}" value="${escapeHtml(value)}" ${disabled ? "disabled" : ""} aria-label="${this.h(titleKey)}" />
+      </label>
+    `;
+  }
+
   renderSettingsTab() {
     const language = readChoice(SETTING.language, [LANGUAGE_AUTO, ...LANGUAGES.map((item) => item.code)], LANGUAGE_AUTO);
     const theme = readChoice(SETTING.theme, DASHBOARD_THEMES, "auto");
@@ -485,17 +550,16 @@ class ModelAnalyticsDashboard {
           ${this.renderSettingSelect(SETTING.density, "settings.density.name", "settings.density.tooltip", this.settings.density)}
         </section>
         <section class="ma-settings-section">
+          <h3>${this.h("settings.group.recency")}</h3>
+          ${this.renderSettingToggle(SETTING.recencyEnabled, "settings.recency.enabled.name", "settings.recency.enabled.tooltip", this.usedThresholdEnabled)}
+          ${this.renderSettingNumber(SETTING.recencyDays, "settings.recency.days.name", "settings.recency.days.tooltip", this.usedThresholdDays, !this.usedThresholdEnabled)}
+        </section>
+        <section class="ma-settings-section">
           <h3>${this.h("settings.group.display")}</h3>
           ${this.renderSettingSelect(SETTING.sizeUnit, "settings.sizeUnit.name", "settings.sizeUnit.tooltip", this.settings.sizeUnit)}
           ${this.renderSettingSelect(SETTING.dateFormat, "settings.dateFormat.name", "settings.dateFormat.tooltip", this.settings.dateFormat)}
           ${this.renderSettingSelect(SETTING.defaultTab, "settings.defaultTab.name", "settings.defaultTab.tooltip", this.settings.defaultTab)}
-          <label class="ma-setting-row ma-setting-toggle-row">
-            <span class="ma-setting-copy">
-              <span class="ma-setting-title">${this.h("settings.starBanner.name")}</span>
-              <span class="ma-setting-description">${this.h("settings.starBanner.tooltip")}</span>
-            </span>
-            <input class="ma-settings-checkbox" type="checkbox" data-setting="${escapeHtml(SETTING.starBanner)}" ${starBanner ? "checked" : ""} aria-label="${this.h("settings.starBanner.name")}" />
-          </label>
+          ${this.renderSettingToggle(SETTING.starBanner, "settings.starBanner.name", "settings.starBanner.tooltip", starBanner)}
         </section>
         <p class="ma-settings-feedback" role="status" aria-live="polite"></p>
       </div>
@@ -505,16 +569,36 @@ class ModelAnalyticsDashboard {
   attachSettingsHandlers(root) {
     if (!root || root.dataset.maSettingsHandlers === "true") return;
     root.dataset.maSettingsHandlers = "true";
+    const feedback = (message) => {
+      const node = root.querySelector(".ma-settings-feedback");
+      if (node) node.textContent = message;
+    };
     const persist = async (control) => {
       const id = control.dataset.setting;
-      const value = control.type === "checkbox" ? control.checked : control.value;
-      const previous = readSetting(id, control.type === "checkbox" ? true : control.value);
+      const isCheckbox = control.type === "checkbox";
+      const isNumber = control.type === "number";
+      let value = isCheckbox ? control.checked : control.value;
+      if (isNumber) {
+        value = parseFloat(control.value);
+        if (!Number.isFinite(value) || value <= 0) {
+          control.value = String(readRecency().days);
+          return;
+        }
+      }
+      const previous = isNumber
+        ? readRecency().days
+        : readSetting(id, isCheckbox ? true : control.value);
+      feedback("");
       const saved = await writeSetting(id, value);
       if (!saved) {
-        if (control.type === "checkbox") control.checked = previous !== false;
+        if (isCheckbox) control.checked = previous !== false;
         else control.value = String(previous);
-        const feedback = root.querySelector(".ma-settings-feedback");
-        if (feedback) feedback.textContent = this.t("settings.saveError");
+        feedback(this.t("settings.saveError"));
+        return;
+      }
+
+      if (id === SETTING.recencyEnabled || id === SETTING.recencyDays) {
+        await this.onRecencyChanged();
         return;
       }
 
@@ -769,28 +853,64 @@ class ModelAnalyticsDashboard {
 let dashboard = null;
 let menuButton = null;
 
+// Definitions handed to ComfyUI at registration. They are kept so their
+// texts can be updated in place when the language changes (the settings
+// dialog reads them again each time it is opened).
+let registeredSettings = [];
+const actionBarButtons = [];
+
 function updateMenuButtonLabel() {
   if (!menuButton) return;
   const tr = createTranslator(resolveLanguage());
   menuButton.textContent = `📊 ${tr.t("app.menuButton")}`;
+  menuButton.title = tr.t("action.open");
+}
+
+function updateActionBarButtons() {
+  const tr = createTranslator(resolveLanguage());
+  for (const button of actionBarButtons) {
+    button.label = tr.t("app.menuButton");
+    button.tooltip = tr.t("action.open");
+  }
+}
+
+// Copies freshly translated texts onto the definitions ComfyUI already
+// holds. Ids, defaults and callbacks stay untouched.
+function relocalizeSettings() {
+  const fresh = buildSettingsDefinitions();
+  for (const definition of fresh) {
+    const target = registeredSettings.find((item) => item.id === definition.id);
+    if (!target) continue;
+    target.name = definition.name;
+    target.tooltip = definition.tooltip;
+    target.category = definition.category;
+    if (definition.options) target.options = definition.options;
+  }
 }
 
 function onAnySettingChanged() {
   // ComfyUI also fires onChange once per setting while registering them,
   // before the dashboard exists - hence the guards.
   updateMenuButtonLabel();
+  updateActionBarButtons();
+  relocalizeSettings();
   dashboard?.onSettingsChanged();
 }
 
-// Setting labels are resolved when ComfyUI registers them, so they use the
-// language that is active at page load (a language change shows up in
-// the settings dialog after the next reload; the dashboard itself updates
-// immediately).
+function onRecencySettingChanged() {
+  dashboard?.onRecencyChanged();
+}
+
+// Setting labels are resolved from the language that is active when they
+// are built. At registration that is the language at page load; after a
+// language change relocalizeSettings() refreshes them in place, so the
+// ComfyUI settings dialog shows the new language the next time it opens.
 function buildSettingsDefinitions() {
   const { t } = createTranslator(resolveLanguage());
   const section = "Model Analytics";
   const general = t("settings.group.general");
   const display = t("settings.group.display");
+  const recency = t("settings.group.recency");
 
   const combo = (id, group, nameKey, tipKey, options, defaultValue) => ({
     id,
@@ -812,6 +932,25 @@ function buildSettingsDefinitions() {
       ],
       LANGUAGE_AUTO,
     ),
+    {
+      id: SETTING.recencyEnabled,
+      name: t("settings.recency.enabled.name"),
+      category: [section, recency, t("settings.recency.enabled.name")],
+      type: "boolean",
+      tooltip: t("settings.recency.enabled.tooltip"),
+      defaultValue: true,
+      onChange: onRecencySettingChanged,
+    },
+    {
+      id: SETTING.recencyDays,
+      name: t("settings.recency.days.name"),
+      category: [section, recency, t("settings.recency.days.name")],
+      type: "number",
+      attrs: { min: 1, step: 1 },
+      tooltip: t("settings.recency.days.tooltip"),
+      defaultValue: DEFAULT_RECENCY_DAYS,
+      onChange: onRecencySettingChanged,
+    },
     combo(
       SETTING.sizeUnit, display, "settings.sizeUnit.name", "settings.sizeUnit.tooltip",
       [
@@ -862,57 +1001,103 @@ function buildSettingsDefinitions() {
   ];
 }
 
-// One-time carry-over of the old localStorage "banner dismissed" flag into
-// the ComfyUI setting, so people who already dismissed it do not see it
-// again after updating.
-async function migrateLegacyStarBannerFlag() {
+// One-time carry-over of preferences that older builds kept in the
+// browser's localStorage into the ComfyUI settings. A legacy key is only
+// removed after its value was saved successfully, so nothing gets lost.
+async function migrateLegacyLocalPreferences() {
   try {
     if (localStorage.getItem(LEGACY_STAR_BANNER_DISMISSED_KEY)) {
       const migrated = await writeSetting(SETTING.starBanner, false);
       if (migrated) localStorage.removeItem(LEGACY_STAR_BANNER_DISMISSED_KEY);
+    }
+
+    const storedEnabled = localStorage.getItem(LEGACY_USED_THRESHOLD_ENABLED_KEY);
+    if (storedEnabled !== null) {
+      const migrated = await writeSetting(SETTING.recencyEnabled, storedEnabled === "1");
+      if (migrated) localStorage.removeItem(LEGACY_USED_THRESHOLD_ENABLED_KEY);
+    }
+
+    const storedDaysRaw = localStorage.getItem(LEGACY_USED_THRESHOLD_DAYS_KEY);
+    if (storedDaysRaw !== null) {
+      const storedDays = parseFloat(storedDaysRaw);
+      const valid = Number.isFinite(storedDays) && storedDays > 0;
+      const migrated = valid ? await writeSetting(SETTING.recencyDays, storedDays) : true;
+      if (migrated) localStorage.removeItem(LEGACY_USED_THRESHOLD_DAYS_KEY);
     }
   } catch {
     // localStorage unavailable - nothing to migrate.
   }
 }
 
+// Entry point for ComfyUI's legacy menu (Settings -> Comfy -> "Use new
+// menu" = Disabled) and for old frontends without the new menu API. The
+// button is created in any case; when the legacy menu is not shown, its
+// container is hidden by ComfyUI, so it never appears twice.
+function addLegacyMenuButton() {
+  menuButton = document.createElement("button");
+  menuButton.type = "button";
+  menuButton.className = "comfy-menu-btn ma-btn ma-menu-btn";
+  updateMenuButtonLabel();
+  menuButton.addEventListener("click", () => {
+    updateMenuButtonLabel();
+    dashboard.open();
+  });
+
+  if (app.menu?.settingsGroup?.element) {
+    app.menu.settingsGroup.element.before(menuButton);
+    return;
+  }
+  const menu = document.querySelector(".comfy-menu");
+  if (menu) {
+    menu.appendChild(menuButton);
+    return;
+  }
+  // Last resort - only when no new-style menu is in use either: a
+  // floating button in the corner (styled in style.css).
+  if (legacyMenuInUse()) {
+    menuButton.className = "comfy-menu-btn ma-btn ma-floating-btn ma-menu-btn";
+    document.body.appendChild(menuButton);
+  } else {
+    menuButton = null;
+  }
+}
+
+function openDashboard() {
+  dashboard?.open();
+}
+
+registeredSettings = buildSettingsDefinitions();
+{
+  const { t } = createTranslator(resolveLanguage());
+  actionBarButtons.push({
+    icon: "pi pi-chart-bar",
+    label: t("app.menuButton"),
+    tooltip: t("action.open"),
+    onClick: openDashboard,
+  });
+}
+
 app.registerExtension({
   name: "Comfy.ModelAnalytics",
-  settings: buildSettingsDefinitions(),
+  settings: registeredSettings,
   commands: [
     {
       id: "ModelAnalytics.Open",
       label: "Model Analytics",
       icon: "pi pi-chart-bar",
-      function: () => dashboard?.open(),
+      function: openDashboard,
     },
   ],
+  // New ComfyUI menu: Extensions -> Model Analytics, plus a button in the
+  // top action bar.
+  menuCommands: [
+    { path: ["Extensions"], commands: ["ModelAnalytics.Open"] },
+  ],
+  actionBarButtons,
   async setup() {
     injectCss();
+    await migrateLegacyLocalPreferences();
     dashboard = new ModelAnalyticsDashboard();
-    await migrateLegacyStarBannerFlag();
-
-    menuButton = document.createElement("button");
-    menuButton.className = "comfy-menu-btn ma-btn ma-menu-btn";
-    updateMenuButtonLabel();
-    menuButton.addEventListener("click", () => {
-      updateMenuButtonLabel();
-      dashboard.open();
-    });
-
-    // Try the modern ComfyUI menu API first, fall back to the legacy
-    // .comfy-menu container so this keeps working across ComfyUI versions.
-    if (app.menu?.settingsGroup?.element) {
-      app.menu.settingsGroup.element.before(menuButton);
-    } else {
-      const menu = document.querySelector(".comfy-menu");
-      if (menu) {
-        menu.appendChild(menuButton);
-      } else {
-        // Last resort: floating button in the corner (styled in style.css).
-        menuButton.className = "comfy-menu-btn ma-btn ma-floating-btn ma-menu-btn";
-        document.body.appendChild(menuButton);
-      }
-    }
+    addLegacyMenuButton();
   },
 });
