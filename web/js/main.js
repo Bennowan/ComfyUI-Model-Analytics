@@ -22,13 +22,18 @@ import {
   serializeCustomAppearance,
 } from "./appearance.js";
 import { calculateInventoryStats } from "./inventory-stats.js";
+import {
+  normalizeTableLayout,
+  reorderTableColumn,
+  resizeAdjacentColumns,
+} from "./table-layout.js";
 
 // Bump this whenever main.js/style.css change, so the injected <link> tag
 // gets a fresh URL and browsers can't serve a stale cached copy of the CSS.
 // (main.js itself is loaded by ComfyUI's own extension loader - if you
 // don't see JS changes after an update, hard-refresh the browser tab,
 // e.g. Ctrl+Shift+R / Cmd+Shift+R, or disable cache in devtools.)
-const EXT_VERSION = "142";
+const EXT_VERSION = "144";
 
 const GITHUB_REPO_URL = "https://github.com/Bennowan/ComfyUI-Model-Analytics";
 
@@ -59,6 +64,7 @@ const SETTING = {
   legacyTheme: "ModelAnalytics.Theme",
   appearance: "ModelAnalytics.Appearance",
   customAppearance: "ModelAnalytics.CustomAppearance",
+  tableLayout: "ModelAnalytics.TableLayout",
   recencyEnabled: "ModelAnalytics.RecencyEnabled",
   recencyDays: "ModelAnalytics.RecencyDays",
 };
@@ -306,6 +312,7 @@ class ModelAnalyticsDashboard {
     this.paletteSnapshot = null;
     this.openAppearancePanel = null;
     this.executionRefreshTimer = null;
+    this.tableLayoutCache = {};
     // Whether the "Used within last N days" window applies at all. When
     // off, any past load (or a workflow reference) counts as used.
     // Both values live in the ComfyUI settings (see loadSettings()).
@@ -1003,6 +1010,93 @@ class ModelAnalyticsDashboard {
     });
   }
 
+  tableColumnDefinitions(tableKey) {
+    const definitions = {
+      used: [
+        { id: "rel_path", labelKey: "col.name", width: 30, minWidth: 150, sortable: true, render: (m) => escapeHtml(m.rel_path), title: (m) => m.rel_path },
+        { id: "size_bytes", labelKey: "col.size", width: 9, minWidth: 68, sortable: true, render: (m) => this.size(m.size_bytes) },
+        { id: "workflows", labelKey: "col.workflows", width: 18, minWidth: 105, sortable: true, render: (m) => m.workflows.length ? escapeHtml(m.workflows.join(", ")) : "—", title: (m) => m.workflows.join(", ") },
+        { id: "used_reason", labelKey: "col.why", width: 16, minWidth: 100, sortable: true, render: (m) => this.usedReasonCell(m) },
+        { id: "use_count", labelKey: "col.loads", width: 8, minWidth: 58, sortable: true, render: (m) => String(m.use_count) },
+        { id: "queue_count", labelKey: "col.queued", width: 8, minWidth: 58, sortable: true, render: (m) => String(m.queue_count || 0) },
+        { id: "last_activity", labelKey: "col.lastUsed", width: 11, minWidth: 102, sortable: true, render: (m) => escapeHtml(this.date(m.last_activity)) },
+      ],
+      unused: [
+        { id: "rel_path", labelKey: "col.name", width: 48, minWidth: 150, sortable: true, render: (m) => escapeHtml(m.rel_path), title: (m) => m.rel_path },
+        { id: "kind", labelKey: "col.category", width: 16, minWidth: 82, sortable: false, render: (m) => `<span class="ma-badge">${escapeHtml(m.kind)}</span>` },
+        { id: "size_bytes", labelKey: "col.size", width: 16, minWidth: 76, sortable: true, render: (m) => this.size(m.size_bytes) },
+        { id: "last_activity", labelKey: "col.lastUsed", width: 20, minWidth: 100, sortable: true, render: (m) => escapeHtml(this.date(m.last_activity)) },
+      ],
+      disabled: [
+        { id: "rel_path", labelKey: "col.name", width: 58, minWidth: 165, sortable: true, render: (m) => escapeHtml(m.rel_path), title: (m) => m.rel_path },
+        { id: "kind", labelKey: "col.category", width: 21, minWidth: 85, sortable: false, render: (m) => `<span class="ma-badge">${escapeHtml(m.kind)}</span>` },
+        { id: "size_bytes", labelKey: "col.size", width: 21, minWidth: 78, sortable: true, render: (m) => this.size(m.size_bytes) },
+      ],
+      workflow: [
+        { id: "rel_path", labelKey: "col.name", width: 48, minWidth: 145, sortable: false, render: (m) => escapeHtml(m.rel_path), title: (m) => m.rel_path },
+        { id: "kind", labelKey: "col.category", width: 18, minWidth: 82, sortable: false, render: (m) => `<span class="ma-badge">${escapeHtml(m.kind)}</span>` },
+        { id: "size_bytes", labelKey: "col.size", width: 17, minWidth: 72, sortable: false, render: (m) => this.size(m.size_bytes) },
+        { id: "status", labelKey: "col.status", width: 17, minWidth: 78, sortable: false, render: () => `<span class="ma-badge ma-badge-used">${this.h("workflow.found")}</span>` },
+      ],
+    };
+    return definitions[tableKey] || [];
+  }
+
+  readAllTableLayouts() {
+    try {
+      const raw = readSetting(SETTING.tableLayout, "");
+      if (raw && typeof raw === "object") return raw;
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  readTableLayout(tableKey, columns) {
+    const stored = Object.prototype.hasOwnProperty.call(this.tableLayoutCache, tableKey)
+      ? this.tableLayoutCache[tableKey]
+      : this.readAllTableLayouts()[tableKey] || {};
+    return normalizeTableLayout(columns, stored);
+  }
+
+  saveTableLayout(tableKey, layout) {
+    this.tableLayoutCache[tableKey] = layout;
+    const allLayouts = { ...this.readAllTableLayouts() };
+    allLayouts[tableKey] = layout;
+    // Keep layout persistence within ComfyUI's settings store, alongside the
+    // other dashboard preferences. This avoids a second storage mechanism.
+    void writeSetting(SETTING.tableLayout, JSON.stringify(allLayouts));
+  }
+
+  renderDataTable(tableKey, rows) {
+    const columns = this.tableColumnDefinitions(tableKey);
+    const layout = this.readTableLayout(tableKey, columns);
+    const byId = new Map(columns.map((column) => [column.id, column]));
+    const ordered = layout.order.map((id) => byId.get(id)).filter(Boolean);
+    return `
+      <div class="ma-table-scroll">
+        <table class="ma-table" data-table="${tableKey}">
+          <colgroup>
+            ${ordered.map((column) => `<col data-ma-column="${column.id}" style="width:${layout.widths[column.id]}%">`).join("")}
+          </colgroup>
+          <thead><tr>
+            ${ordered.map((column) => this.headerCell(column.labelKey, column.id, tableKey, column.sortable)).join("")}
+          </tr></thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                ${ordered.map((column) => {
+                  const title = column.title ? ` title="${escapeHtml(column.title(row))}"` : "";
+                  return `<td${title}>${column.render(row)}</td>`;
+                }).join("")}
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
   renderUsedTab() {
     const stats = calculateInventoryStats(this.data.models || []);
     const used = stats.used;
@@ -1017,34 +1111,7 @@ class ModelAnalyticsDashboard {
 
     return `
       <div class="ma-summary">${this.h(`used.summary.${variant}`, { used: bold(used.length), total: bold(stats.used.length + stats.unused.length), days })}</div>
-      <div class="ma-table-scroll">
-        <table class="ma-table" data-table="used">
-          <thead>
-            <tr>
-              ${this.headerCell("col.name", "rel_path", "used")}
-              ${this.headerCell("col.size", "size_bytes", "used")}
-              ${this.headerCell("col.workflows", "workflows", "used")}
-              ${this.headerCell("col.why", "used_reason", "used")}
-              ${this.headerCell("col.loads", "use_count", "used")}
-              ${this.headerCell("col.queued", "queue_count", "used")}
-              ${this.headerCell("col.lastUsed", "last_activity", "used")}
-            </tr>
-          </thead>
-          <tbody>
-            ${sorted.map((m) => `
-              <tr>
-                <td title="${escapeHtml(m.rel_path)}">${escapeHtml(m.rel_path)}</td>
-                <td>${this.size(m.size_bytes)}</td>
-                <td title="${escapeHtml(m.workflows.join(', '))}">${m.workflows.length ? escapeHtml(m.workflows.join(", ")) : "—"}</td>
-                <td>${this.usedReasonCell(m)}</td>
-                <td>${m.use_count}</td>
-                <td>${m.queue_count || 0}</td>
-                <td>${escapeHtml(this.date(m.last_activity))}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
+      ${this.renderDataTable("used", sorted)}
     `;
   }
 
@@ -1062,28 +1129,7 @@ class ModelAnalyticsDashboard {
 
     return `
       <div class="ma-summary">${this.h(`unused.summary.${variant}`, { count: bold(unused.length), size: bold(this.size(totalBytes)), days: this.usedThresholdDays })}</div>
-      <div class="ma-table-scroll">
-        <table class="ma-table" data-table="unused">
-          <thead>
-            <tr>
-              ${this.headerCell("col.name", "rel_path", "unused")}
-              ${this.headerCell("col.category", "kind", "unused")}
-              ${this.headerCell("col.size", "size_bytes", "unused")}
-              ${this.headerCell("col.lastUsed", "last_activity", "unused")}
-            </tr>
-          </thead>
-          <tbody>
-            ${sorted.map((m) => `
-              <tr>
-                <td title="${escapeHtml(m.rel_path)}">${escapeHtml(m.rel_path)}</td>
-                <td><span class="ma-badge">${escapeHtml(m.kind)}</span></td>
-                <td>${this.size(m.size_bytes)}</td>
-                <td>${escapeHtml(this.date(m.last_activity))}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
+      ${this.renderDataTable("unused", sorted)}
     `;
   }
 
@@ -1100,26 +1146,7 @@ class ModelAnalyticsDashboard {
 
     return `
       <div class="ma-summary">${this.h("disabled.summary", { count: bold(sorted.length), suffix: code(".disabled"), size: bold(this.size(disabledBytes)) })}</div>
-      <div class="ma-table-scroll">
-        <table class="ma-table" data-table="disabled">
-          <thead>
-            <tr>
-              ${this.headerCell("col.name", "rel_path", "disabled")}
-              ${this.headerCell("col.category", "kind", "disabled")}
-              ${this.headerCell("col.size", "size_bytes", "disabled")}
-            </tr>
-          </thead>
-          <tbody>
-            ${sorted.map((m) => `
-              <tr>
-                <td title="${escapeHtml(m.rel_path)}">${escapeHtml(m.rel_path)}</td>
-                <td><span class="ma-badge">${escapeHtml(m.kind)}</span></td>
-                <td>${this.size(m.size_bytes)}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
+      ${this.renderDataTable("disabled", sorted)}
     `;
   }
 
@@ -1140,47 +1167,128 @@ class ModelAnalyticsDashboard {
       <select class="ma-select" data-role="workflow-select">
         ${names.map((n) => `<option value="${escapeHtml(n)}" ${n === this.selectedWorkflow ? "selected" : ""}>${escapeHtml(n)}</option>`).join("")}
       </select>
-      ${modelsInWorkflow.length ? `
-        <div class="ma-table-scroll">
-          <table class="ma-table">
-            <thead>
-              <tr><th>${this.h("col.name")}</th><th>${this.h("col.category")}</th><th>${this.h("col.size")}</th><th>${this.h("col.status")}</th></tr>
-            </thead>
-            <tbody>
-              ${modelsInWorkflow.map((m) => `
-                <tr>
-                  <td title="${escapeHtml(m.rel_path)}">${escapeHtml(m.rel_path)}</td>
-                  <td><span class="ma-badge">${escapeHtml(m.kind)}</span></td>
-                  <td>${this.size(m.size_bytes)}</td>
-                  <td><span class="ma-badge ma-badge-used">${this.h("workflow.found")}</span></td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        </div>
-      ` : `<div class="ma-empty-state">${this.h("workflow.noModels", { name: this.selectedWorkflow })}</div>`}
+      ${modelsInWorkflow.length ? this.renderDataTable("workflow", modelsInWorkflow) : `<div class="ma-empty-state">${this.h("workflow.noModels", { name: this.selectedWorkflow })}</div>`}
     `;
   }
 
-  headerCell(labelKey, col, tableKey) {
-    const state = this.sortState[tableKey];
-    const arrow = state.col === col ? (state.dir === 1 ? "▲" : "▼") : "";
-    return `<th data-col="${col}" data-table-key="${tableKey}">${this.h(labelKey)} <span class="ma-sort-arrow">${arrow}</span></th>`;
+  headerCell(labelKey, col, tableKey, sortable = true) {
+    const state = sortable ? this.sortState[tableKey] : null;
+    const arrow = state?.col === col ? (state.dir === 1 ? "▲" : "▼") : "";
+    const sortAttr = sortable ? `data-col="${col}"` : "";
+    return `
+      <th data-ma-column="${col}" data-table-key="${tableKey}" ${sortAttr} draggable="true">
+        <span class="ma-th-content">
+          <span class="ma-col-drag" aria-hidden="true">⠿</span>
+          <span class="ma-th-label">${this.h(labelKey)}</span>
+          ${sortable ? `<span class="ma-sort-arrow">${arrow}</span>` : ""}
+        </span>
+        <span class="ma-col-resizer" data-ma-resize="${col}" role="separator" aria-orientation="vertical" aria-label="Resize column"></span>
+      </th>
+    `;
   }
 
   attachSortHandlers(body) {
-    body.querySelectorAll("th[data-col]").forEach((th) => {
-      th.addEventListener("click", () => {
-        const col = th.dataset.col;
-        const tableKey = th.dataset.tableKey;
-        const state = this.sortState[tableKey];
-        if (state.col === col) {
-          state.dir *= -1;
-        } else {
-          state.col = col;
-          state.dir = 1;
+    body.querySelectorAll("table.ma-table[data-table]").forEach((table) => {
+      const tableKey = table.dataset.table;
+      const columns = this.tableColumnDefinitions(tableKey);
+
+      table.querySelectorAll("th[data-ma-column]").forEach((th) => {
+        const columnId = th.dataset.maColumn;
+
+        if (th.hasAttribute("data-col")) {
+          th.addEventListener("click", (event) => {
+            if (event.target?.closest?.(".ma-col-resizer") || th.dataset.maSuppressSort === "true") return;
+            const col = th.dataset.col;
+            const state = this.sortState[tableKey];
+            if (!state) return;
+            if (state.col === col) state.dir *= -1;
+            else {
+              state.col = col;
+              state.dir = 1;
+            }
+            this.render();
+          });
         }
-        this.render();
+
+        th.addEventListener("dragstart", (event) => {
+          if (event.target?.closest?.(".ma-col-resizer")) {
+            event.preventDefault();
+            return;
+          }
+          th.dataset.maSuppressSort = "true";
+          th.classList.add("ma-column-dragging");
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", columnId);
+          }
+        });
+
+        th.addEventListener("dragover", (event) => {
+          if (th.classList.contains("ma-column-dragging")) return;
+          event.preventDefault();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+          th.classList.add("ma-column-drop-target");
+        });
+
+        th.addEventListener("dragleave", () => th.classList.remove("ma-column-drop-target"));
+
+        th.addEventListener("drop", (event) => {
+          event.preventDefault();
+          th.classList.remove("ma-column-drop-target");
+          const sourceId = event.dataTransfer?.getData("text/plain");
+          if (!sourceId || sourceId === columnId) return;
+          const layout = this.readTableLayout(tableKey, columns);
+          const targetBounds = th.getBoundingClientRect();
+          const dropPosition = event.clientX >= targetBounds.left + targetBounds.width / 2 ? "after" : "before";
+          const next = reorderTableColumn(layout, sourceId, columnId, dropPosition);
+          this.saveTableLayout(tableKey, next);
+          this.render();
+        });
+
+        th.addEventListener("dragend", () => {
+          th.classList.remove("ma-column-dragging");
+          table.querySelectorAll(".ma-column-drop-target").forEach((node) => node.classList.remove("ma-column-drop-target"));
+          window.setTimeout(() => { th.dataset.maSuppressSort = "false"; }, 0);
+        });
+
+        const resizer = th.querySelector(".ma-col-resizer");
+        if (!resizer) return;
+        resizer.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const layout = this.readTableLayout(tableKey, columns);
+          const width = table.getBoundingClientRect().width;
+          if (!width) return;
+          const startX = event.clientX;
+          const isLastColumn = layout.order[layout.order.length - 1] === columnId;
+          let latest = layout;
+          table.classList.add("ma-table-resizing");
+          document.documentElement.classList.add("ma-column-resizing");
+
+          const onMove = (moveEvent) => {
+            moveEvent.preventDefault();
+            const rawDelta = moveEvent.clientX - startX;
+            const delta = isLastColumn ? -rawDelta : rawDelta;
+            latest = resizeAdjacentColumns(layout, columns, columnId, delta, width);
+            table.querySelectorAll("col[data-ma-column]").forEach((col) => {
+              const nextWidth = latest.widths[col.dataset.maColumn];
+              if (Number.isFinite(nextWidth)) col.style.width = `${nextWidth}%`;
+            });
+          };
+
+          const finish = () => {
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", finish);
+            table.classList.remove("ma-table-resizing");
+            document.documentElement.classList.remove("ma-column-resizing");
+            this.saveTableLayout(tableKey, latest);
+          };
+
+          window.addEventListener("pointermove", onMove, { passive: false });
+          window.addEventListener("pointerup", finish, { once: true });
+          window.addEventListener("pointercancel", finish, { once: true });
+        });
       });
     });
   }
@@ -1227,7 +1335,8 @@ function updateActionBarButtons() {
   for (const button of actionBarButtons) {
     button.label = tr.t("app.menuButton");
     button.tooltip = tr.t("action.open");
-    // Keep the visual button class when labels are refreshed after a language change.
+    // Keep the custom class in place when labels are refreshed after a
+    // language change; ComfyUI applies this class to the actual button.
     button.class = "ma-actionbar-button";
   }
 }
@@ -1358,6 +1467,12 @@ function buildSettingsDefinitions() {
       type: "hidden",
       defaultValue: "",
       onChange: onAnySettingChanged,
+    },
+    {
+      id: SETTING.tableLayout,
+      name: "Model Analytics table layouts",
+      type: "hidden",
+      defaultValue: "",
     },
   ];
 }
