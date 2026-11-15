@@ -1,56 +1,45 @@
 /* Model Analytics dashboard.
  *
- * Theming: Auto follows ComfyUI's own design tokens (--background,
- * --foreground, --primary, --secondary, --border, --input, --destructive,
- * ... as set by every ComfyUI colour palette). The optional Dark and Light
- * choices are scoped to the dashboard overlay and are built only from CSS
- * system colours (Canvas, CanvasText, AccentColor) - no hard-coded colour
- * palette. The ComfyUI interface itself is never changed. Tints and hover
- * states are derived from the active dashboard tokens.
+ * Appearance uses ComfyUI's own active CSS palette variables by default.
+ * Selected ComfyUI palettes are snapshotted and scoped to this dashboard;
+ * advanced custom values override only this local layer. The global
+ * ComfyUI interface and workflow canvas are never restyled by this file.
  */
 
-.ma-overlay,
+.ma-scope,
 .ma-menu-btn,
 .ma-floating-btn {
-  /* ComfyUI design tokens first, then legacy theme tokens, then CSS system
-     colours as the last resort (e.g. when the stylesheet is used outside
-     ComfyUI). */
-  --ma-fg: var(--foreground, var(--fg-color, CanvasText));
-  --ma-bg: var(--background, var(--comfy-menu-bg, Canvas));
-  --ma-accent: var(--primary, var(--p-primary-color, AccentColor));
-  /* Text colour on top of the accent colour. ComfyUI has no token for it
-     (a light accent such as the Light palette's needs dark text), so it is
-     derived from the accent's lightness; white where relative colours are
-     not supported. */
-  --ma-accent-fg: white;
-  /* The accent colour as TEXT colour (active tab, accent buttons). Palette
-     accents can be too light or too dark to read on the surface (the Light
-     palette's cyan on white), so it is pulled towards the text colour. */
-  --ma-accent-text: color-mix(in srgb, var(--ma-accent) 55%, var(--ma-fg));
-  /* ComfyUI has no success token: a green tinted towards the text colour. */
-  --ma-success: color-mix(in srgb, green 70%, var(--ma-fg));
-  --ma-danger: var(--destructive, var(--error-text, red));
-
-  /* Derived tokens. */
-  --ma-surface: var(--secondary, var(--comfy-menu-secondary-bg, color-mix(in srgb, var(--ma-fg) 5%, var(--ma-bg))));
-  --ma-input-bg: var(--input, var(--comfy-input-bg, color-mix(in srgb, var(--ma-fg) 8%, var(--ma-bg))));
-  --ma-input-fg: var(--input-text, var(--ma-fg));
-  --ma-muted: var(--muted-foreground, var(--descrip-text, color-mix(in srgb, var(--ma-fg) 62%, var(--ma-bg))));
-  --ma-border: var(--border, var(--border-color, color-mix(in srgb, var(--ma-fg) 22%, var(--ma-bg))));
+  /* Model Analytics tokens resolve from the selected ComfyUI palette first.
+     The optional Custom Appearance values only override this local layer. */
+  --ma-bg: var(--ma-custom-bg, var(--comfy-menu-bg, var(--background, var(--bg-color, Canvas))));
+  --ma-surface: var(--ma-custom-surface, var(--comfy-menu-secondary-bg, var(--card, var(--secondary, var(--content-bg, var(--ma-bg))))));
+  --ma-fg: var(--ma-custom-fg, var(--fg-color, var(--foreground, var(--content-fg, CanvasText))));
+  --ma-muted: var(--ma-custom-muted, var(--descrip-text, var(--drag-text, var(--muted-foreground, color-mix(in srgb, var(--ma-fg) 62%, var(--ma-bg))))));
+  --ma-border: var(--ma-custom-border, var(--border-color, var(--border, color-mix(in srgb, var(--ma-fg) 22%, var(--ma-bg)))));
   --ma-divider: color-mix(in srgb, var(--ma-border) 70%, transparent);
-  --ma-hover: color-mix(in srgb, var(--ma-fg) 9%, transparent);
-  --ma-pressed: color-mix(in srgb, var(--ma-fg) 16%, transparent);
+  --ma-accent: var(--ma-custom-accent, var(--primary, var(--p-primary-color, AccentColor)));
+  --ma-accent-fg-auto: AccentColorText;
+  --ma-accent-fg: var(--ma-custom-accent-fg, var(--ma-accent-fg-auto));
+  --ma-accent-text: color-mix(in srgb, var(--ma-accent) 55%, var(--ma-fg));
+  --ma-success: var(--ma-custom-success, var(--color-success, color-mix(in srgb, green 70%, var(--ma-fg))));
+  --ma-danger: var(--ma-custom-danger, var(--destructive, var(--error-text, color-mix(in srgb, red 75%, var(--ma-fg)))));
+  --ma-input-bg: var(--ma-custom-input-bg, var(--comfy-input-bg, var(--input, color-mix(in srgb, var(--ma-fg) 8%, var(--ma-bg)))));
+  --ma-input-fg: var(--ma-custom-input-fg, var(--input-text, var(--ma-fg)));
+  --ma-hover: var(--ma-custom-hover, var(--content-hover-bg, var(--accent, color-mix(in srgb, var(--ma-fg) 9%, transparent))));
+  --ma-pressed: var(--ma-custom-active, var(--tr-even-bg-color, var(--muted, color-mix(in srgb, var(--ma-fg) 16%, transparent))));
   --ma-accent-soft: color-mix(in srgb, var(--ma-accent) 16%, transparent);
-  --ma-radius: 10px;
-  --ma-radius-sm: 7px;
+  --ma-ring: var(--ring, var(--ma-accent));
+  --ma-radius: var(--ma-custom-radius, 10px);
+  --ma-radius-sm: max(0px, calc(var(--ma-radius) - 3px));
+  --ma-font-size: var(--ma-custom-font-size, 13px);
   --ma-row-pad-y: 8px;
 }
 
 @supports (color: oklch(from red l c h)) {
-  .ma-overlay,
+  .ma-scope,
   .ma-menu-btn,
   .ma-floating-btn {
-    --ma-accent-fg: oklch(from var(--ma-accent) clamp(0, (l - 0.6) * -1000, 1) 0 0);
+    --ma-accent-fg-auto: oklch(from var(--ma-accent) clamp(0, (l - 0.6) * -1000, 1) 0 0);
   }
 }
 
@@ -76,7 +65,7 @@
   flex-direction: column;
   color: var(--ma-fg);
   font-family: var(--font-inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
-  font-size: 13px;
+  font-size: var(--ma-font-size, 13px);
   box-shadow: 0 18px 50px var(--shadow-color, rgb(0 0 0 / 0.35));
   overflow: hidden;
 }
@@ -269,6 +258,26 @@
   background: var(--ma-pressed);
   transform: translateY(1px);
 }
+.ma-tab-count {
+  display: inline-grid;
+  min-width: 19px;
+  height: 18px;
+  margin-left: 7px;
+  padding: 0 5px;
+  place-items: center;
+  color: var(--ma-muted);
+  background: var(--ma-hover);
+  border-radius: 5px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.ma-tab-count[hidden] { display: none; }
+.ma-tab-btn.active .ma-tab-count {
+  color: var(--ma-accent-text);
+  background: var(--ma-accent-soft);
+}
+
 .ma-tab-btn.active {
   color: var(--ma-accent-text);
   background: var(--ma-accent-soft);
@@ -280,6 +289,7 @@
 .ma-body {
   flex: 1;
   overflow: hidden;
+  min-width: 0;
   padding: 14px 18px;
   display: flex;
   flex-direction: column;
@@ -427,6 +437,19 @@ table.ma-table tbody tr:hover {
   transition: background-color 0.15s ease, border-color 0.15s ease,
     box-shadow 0.15s ease, transform 0.05s ease;
 }
+.ma-menu-btn .ma-menu-btn-icon {
+  display: inline-grid;
+  width: 21px;
+  height: 21px;
+  place-items: center;
+  flex: 0 0 21px;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 0.16);
+  font-size: 12px;
+}
+.ma-menu-btn .ma-menu-btn-label {
+  letter-spacing: .01em;
+}
 .comfy-menu-btn.ma-menu-btn:hover {
   background: color-mix(in srgb, var(--ma-accent) 88%, var(--ma-fg));
   border-color: var(--ma-accent);
@@ -457,6 +480,10 @@ table.ma-table tbody tr:hover {
 }
 .ma-floating-btn:active {
   background: color-mix(in srgb, var(--ma-accent) 78%, var(--ma-fg));
+}
+
+.ma-modal--banner .ma-star-header {
+  display: none;
 }
 
 .ma-star-banner {
@@ -510,37 +537,38 @@ table.ma-table tbody tr:hover {
   }
 }
 
-/* ---- Independent dashboard theme --------------------------------- */
-/* "Auto" leaves the ComfyUI design tokens untouched. "Dark" and "Light"
-   switch the overlay's colour scheme and rebuild every token from CSS
-   system colours, so the dashboard is independent of the active ComfyUI
-   palette while still containing no hard-coded palette. */
-.ma-overlay[data-ma-theme="dark"] {
-  color-scheme: dark;
-}
-.ma-overlay[data-ma-theme="light"] {
-  color-scheme: light;
-}
-.ma-overlay[data-ma-theme="dark"],
-.ma-overlay[data-ma-theme="light"] {
-  --ma-fg: CanvasText;
-  --ma-bg: Canvas;
-  --ma-accent: AccentColor;
-  --ma-success: color-mix(in srgb, green 70%, CanvasText);
-  --ma-danger: color-mix(in srgb, red 75%, CanvasText);
-  --ma-surface: color-mix(in srgb, CanvasText 7%, Canvas);
-  --ma-input-bg: color-mix(in srgb, CanvasText 4%, Canvas);
-  --ma-input-fg: CanvasText;
-  --ma-muted: color-mix(in srgb, CanvasText 62%, Canvas);
-  --ma-border: color-mix(in srgb, CanvasText 22%, Canvas);
+/* ---- In-dashboard settings ----------------------------------------- */
+
+.ma-body.ma-body-settings {
+  /* Use the entire modal content width. A flex child with an intrinsic width
+     can otherwise leave a large empty strip beside the settings scrollbar. */
+  display: block;
+  flex: 1 1 0%;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
 }
 
-/* ---- In-dashboard settings ----------------------------------------- */
-.ma-settings-page {
-  flex: 1;
+.ma-body.ma-body-settings > .ma-settings-page {
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-width: 0;
   min-height: 0;
-  overflow: auto;
-  padding: 2px 2px 12px;
+  margin: 0;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding: 14px 18px 12px;
+}
+
+.ma-settings-section {
+  width: 100%;
+  max-width: none;
 }
 
 .ma-settings-intro {
@@ -663,4 +691,154 @@ table.ma-table tbody tr:hover {
     align-self: flex-start;
     margin: 2px 0 4px;
   }
+}
+
+
+/* ---- ComfyUI theme picker and advanced appearance ----------------- */
+.ma-appearance-stack {
+  display: grid;
+  gap: 10px;
+  padding: 12px 0 4px;
+}
+.ma-appearance-card {
+  overflow: hidden;
+  background: var(--ma-bg);
+  border: 1px solid var(--ma-border);
+  border-radius: calc(var(--ma-radius) + 2px);
+  transition: border-color .14s ease, background-color .14s ease;
+}
+.ma-appearance-card:focus-within,
+.ma-appearance-card.is-open {
+  border-color: color-mix(in srgb, var(--ma-accent) 44%, var(--ma-border));
+}
+.ma-appearance-disclosure {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 11px 13px;
+  color: var(--ma-fg);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}
+.ma-appearance-disclosure:hover { background: var(--ma-hover); }
+.ma-appearance-leading {
+  display: grid;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  color: var(--ma-accent);
+  background: color-mix(in srgb, var(--ma-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ma-accent) 22%, transparent);
+  border-radius: var(--ma-radius-sm);
+  font-size: 15px;
+}
+.ma-appearance-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.ma-appearance-title { font-weight: 650; letter-spacing: .005em; }
+.ma-appearance-subtitle {
+  overflow: hidden;
+  color: var(--ma-muted);
+  font-size: .91em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ma-appearance-chevron { flex: 0 0 auto; color: var(--ma-muted); font-size: 12px; }
+.ma-theme-panel,
+.ma-custom-panel {
+  padding: 12px 13px 14px;
+  border-top: 1px solid var(--ma-divider);
+}
+.ma-theme-panel[hidden],
+.ma-custom-panel[hidden] { display: none !important; }
+.ma-theme-panel { display: grid; gap: 10px; }
+.ma-theme-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 10px;
+  color: var(--ma-fg);
+  background: transparent;
+  border: 1px solid var(--ma-divider);
+  border-radius: var(--ma-radius-sm);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color .12s ease, background-color .12s ease;
+}
+.ma-theme-choice:hover { background: var(--ma-hover); border-color: var(--ma-border); }
+.ma-theme-choice:focus-visible,
+.ma-appearance-disclosure:focus-visible { outline: 2px solid var(--ma-ring); outline-offset: 2px; }
+.ma-theme-choice.is-selected {
+  background: color-mix(in srgb, var(--ma-accent) 10%, var(--ma-surface));
+  border-color: color-mix(in srgb, var(--ma-accent) 58%, var(--ma-border));
+}
+.ma-theme-swatch {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  background: var(--ma-accent);
+  border: 1px solid color-mix(in srgb, var(--ma-fg) 18%, transparent);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 3px var(--ma-surface);
+}
+.ma-theme-choice-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ma-theme-follow { width: 100%; min-height: 54px; padding: 9px 11px; }
+.ma-theme-follow-icon {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: var(--ma-muted);
+  background: var(--ma-hover);
+  border-radius: var(--ma-radius-sm);
+}
+.ma-theme-choice-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.ma-theme-choice-hint { color: var(--ma-muted); font-size: .85em; }
+.ma-theme-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.ma-custom-panel { padding-top: 4px; }
+.ma-custom-panel .ma-section { margin: 0; }
+.ma-custom-panel .ma-section-title { display: none; }
+.ma-custom-panel .ma-section-note { margin: 8px 0 10px; color: var(--ma-muted); font-size: 12px; line-height: 1.45; }
+.ma-tokens { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); column-gap: 26px; }
+.ma-token { display: flex; align-items: center; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--ma-divider); }
+.ma-token-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ma-token-value { min-width: 64px; color: var(--ma-muted); font-family: ui-monospace, monospace; font-size: .9em; text-align: right; }
+.ma-token-value[data-set="true"] { color: var(--ma-fg); }
+.ma-color { width: 32px; height: 28px; padding: 2px; background: var(--ma-input-bg); border: 1px solid var(--ma-border); border-radius: var(--ma-radius-sm); cursor: pointer; }
+.ma-custom-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 48px;
+  padding: 8px 0;
+  border-top: 1px solid var(--ma-divider);
+}
+.ma-custom-row-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.ma-custom-row-title { font-weight: 600; }
+.ma-custom-row-hint { color: var(--ma-muted); font-size: .88em; }
+.ma-custom-row .ma-input,
+.ma-custom-row .ma-select { width: min(240px, 44%); min-width: 120px; }
+.ma-actions { display: flex; gap: 8px; padding-top: 12px; }
+.ma-settings-feedback { min-height: 18px; margin: 0; color: var(--ma-danger); font-size: 11.5px; }
+
+@media (max-width: 760px) {
+  .ma-theme-grid { grid-template-columns: minmax(0, 1fr); }
+  .ma-tokens { grid-template-columns: 1fr; }
+  .ma-custom-row { align-items: stretch; flex-direction: column; gap: 7px; }
+  .ma-custom-row .ma-input, .ma-custom-row .ma-select { width: 100%; min-width: 0; }
 }

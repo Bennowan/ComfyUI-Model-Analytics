@@ -9,13 +9,26 @@ import {
   isSupportedLanguage,
   mapComfyLocale,
 } from "./i18n/index.js";
+import {
+  BUILTIN_COMFY_PALETTES,
+  COLOR_TOKENS,
+  FONT_SIZE_RANGE,
+  RADIUS_RANGE,
+  SCHEMES,
+  applyAppearance,
+  effectiveTokenHex,
+  parseCustomAppearance,
+  readComfyPaletteSnapshot,
+  serializeCustomAppearance,
+} from "./appearance.js";
+import { calculateInventoryStats } from "./inventory-stats.js";
 
 // Bump this whenever main.js/style.css change, so the injected <link> tag
 // gets a fresh URL and browsers can't serve a stale cached copy of the CSS.
 // (main.js itself is loaded by ComfyUI's own extension loader - if you
 // don't see JS changes after an update, hard-refresh the browser tab,
 // e.g. Ctrl+Shift+R / Cmd+Shift+R, or disable cache in devtools.)
-const EXT_VERSION = "11";
+const EXT_VERSION = "142";
 
 const GITHUB_REPO_URL = "https://github.com/Bennowan/ComfyUI-Model-Analytics";
 
@@ -28,6 +41,7 @@ const LEGACY_STAR_BANNER_DISMISSED_KEY = "ma_star_banner_dismissed";
 const LEGACY_USED_THRESHOLD_ENABLED_KEY = "ma_used_threshold_enabled";
 const LEGACY_USED_THRESHOLD_DAYS_KEY = "ma_used_threshold_days";
 const DEFAULT_RECENCY_DAYS = 7;
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 // ---------------------------------------------------------------------
 // Settings (stored by ComfyUI's own settings system, so they are
@@ -41,8 +55,10 @@ const SETTING = {
   density: "ModelAnalytics.RowDensity",
   dateFormat: "ModelAnalytics.DateFormat",
   defaultTab: "ModelAnalytics.DefaultTab",
-  starBanner: "ModelAnalytics.ShowStarBanner",
-  theme: "ModelAnalytics.Theme",
+  starBannerDismissed: "ModelAnalytics.StarBannerDismissed",
+  legacyTheme: "ModelAnalytics.Theme",
+  appearance: "ModelAnalytics.Appearance",
+  customAppearance: "ModelAnalytics.CustomAppearance",
   recencyEnabled: "ModelAnalytics.RecencyEnabled",
   recencyDays: "ModelAnalytics.RecencyDays",
 };
@@ -54,7 +70,6 @@ const COMFY_MENU_SETTING = "Comfy.UseNewMenu";
 const LANGUAGE_AUTO = "auto";
 const DATA_TABS = ["used", "unused", "disabled", "workflow"];
 const TABS = [...DATA_TABS, "settings"];
-const DASHBOARD_THEMES = ["auto", "dark", "light"];
 const SIZE_UNITS = ["binary", "decimal"];
 const DENSITIES = ["normal", "compact"];
 const DATE_FORMATS = ["system", "iso"];
@@ -104,6 +119,92 @@ function readChoice(id, allowed, fallback) {
 // The language the dashboard should use right now. A manual choice always
 // wins and is never written by this extension; "auto" follows ComfyUI's
 // own language and falls back to English when we do not ship it.
+function normalizeAppearancePreference(value) {
+  if (value === "custom" || value === "follow") return value;
+  if (typeof value === "string" && value.startsWith("palette:")) {
+    const id = value.slice("palette:".length).trim();
+    if (id && /^[a-z0-9_-]+$/i.test(id)) return `palette:${id}`;
+  }
+  // One-time compatibility with the previous Auto / Dark / Light setting.
+  if (value === undefined || value === null || value === "") {
+    const legacy = readSetting(SETTING.legacyTheme, "auto");
+    if (legacy === "dark" || legacy === "light") return `palette:${legacy}`;
+  }
+  return "follow";
+}
+
+function getAppearanceMode(preference) {
+  if (preference === "custom") return "custom";
+  return preference.startsWith("palette:") ? "palette" : "follow";
+}
+
+function getAppearancePaletteId(preference) {
+  return preference.startsWith("palette:") ? preference.slice("palette:".length) : "";
+}
+
+function getComfyPaletteStore() {
+  // ComfyUI currently keeps its palette registry in a Pinia store. It is not
+  // part of the documented ExtensionManager API, so discover it defensively
+  // and fall back to the public custom-palette setting when unavailable.
+  const mounts = [
+    document.getElementById("vue-app"),
+    document.getElementById("app"),
+    document.querySelector("[data-v-app]"),
+  ].filter(Boolean);
+  for (const mount of mounts) {
+    const vueApp = mount.__vue_app__;
+    const context = vueApp?._context;
+    if (!context) continue;
+    const globals = context.config?.globalProperties;
+    const provides = context.provides || {};
+    const candidates = [globals?.$pinia];
+    for (const key of Reflect.ownKeys(provides)) candidates.push(provides[key]);
+    const pinia = candidates.find((candidate) => candidate?._s && typeof candidate._s.values === "function");
+    if (!pinia) continue;
+    for (const store of pinia._s.values()) {
+      if (store?.palettesLookup && typeof store.completePalette === "function") return store;
+    }
+  }
+  return null;
+}
+
+function getCustomComfyPalettes() {
+  let custom = readSetting("Comfy.CustomColorPalettes", {});
+  if (typeof custom === "string") {
+    try { custom = JSON.parse(custom); } catch { custom = {}; }
+  }
+  return custom && typeof custom === "object" && !Array.isArray(custom) ? custom : {};
+}
+
+function getComfyPaletteChoices() {
+  const store = getComfyPaletteStore();
+  const choices = new Map();
+  if (store?.palettesLookup) {
+    for (const [id, palette] of Object.entries(store.palettesLookup)) {
+      if (!/^[a-z0-9_-]+$/i.test(id) || !palette || typeof palette !== "object") continue;
+      choices.set(id, { id, name: palette.name || id });
+    }
+  }
+  for (const [id, palette] of Object.entries(getCustomComfyPalettes())) {
+    if (!/^[a-z0-9_-]+$/i.test(id) || !palette || typeof palette !== "object") continue;
+    choices.set(id, { id, name: typeof palette.name === "string" && palette.name.trim() ? palette.name.trim() : id });
+  }
+  const activeId = readSetting("Comfy.ColorPalette", "dark");
+  if (activeId && !choices.has(activeId)) {
+    choices.set(activeId, { id: activeId, name: activeId });
+  }
+  return [...choices.values()].sort((a, b) => {
+    const aIndex = BUILTIN_COMFY_PALETTES.findIndex((item) => item.id === a.id);
+    const bIndex = BUILTIN_COMFY_PALETTES.findIndex((item) => item.id === b.id);
+    if (aIndex !== -1 || bIndex !== -1) {
+      if (aIndex === -1) return 1;
+      if (bIndex === -1) return -1;
+      return aIndex - bIndex;
+    }
+    return a.name.localeCompare(b.name);
+  });
+}
+
 function resolveLanguage() {
   const preference = readSetting(SETTING.language, LANGUAGE_AUTO);
   if (preference !== LANGUAGE_AUTO && isSupportedLanguage(preference)) return preference;
@@ -125,49 +226,20 @@ function legacyMenuInUse() {
 }
 
 function currentSettings() {
+  const appearancePreference = normalizeAppearancePreference(readSetting(SETTING.appearance, undefined));
   return {
     sizeUnit: readChoice(SETTING.sizeUnit, SIZE_UNITS, "binary"),
     density: readChoice(SETTING.density, DENSITIES, "normal"),
     dateFormat: readChoice(SETTING.dateFormat, DATE_FORMATS, "system"),
     defaultTab: readChoice(SETTING.defaultTab, DATA_TABS, "used"),
-    starBanner: readSetting(SETTING.starBanner, true) !== false,
-    theme: readChoice(SETTING.theme, DASHBOARD_THEMES, "auto"),
+    // The banner is visible by default. Only an explicit X dismissal hides it;
+    // old versions of the visible on/off toggle are deliberately ignored.
+    starBanner: readSetting(SETTING.starBannerDismissed, false) !== true,
+    appearancePreference,
+    appearance: getAppearanceMode(appearancePreference),
+    paletteId: getAppearancePaletteId(appearancePreference),
+    customAppearance: String(readSetting(SETTING.customAppearance, "") ?? ""),
   };
-}
-
-// ---------------------------------------------------------------------
-// Theme: Auto uses ComfyUI's CSS variables; explicit Dark/Light overrides
-// are scoped to the overlay in style.css. The background is also probed so
-// native controls (select popups, checkboxes, scrollbars) use the right scheme.
-// ---------------------------------------------------------------------
-
-function parseColorToRgb(value) {
-  const rgb = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i.exec(value);
-  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
-  const srgb = /^color\(\s*srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/i.exec(value);
-  if (srgb) return [Number(srgb[1]) * 255, Number(srgb[2]) * 255, Number(srgb[3]) * 255];
-  return null;
-}
-
-function applyColorScheme(overlay) {
-  // Explicit Dark/Light set their own colour-scheme in style.css.
-  if (overlay.dataset.maTheme !== "auto") {
-    overlay.style.colorScheme = "";
-    return;
-  }
-  try {
-    const probe = document.createElement("div");
-    probe.style.cssText = "position:absolute;width:0;height:0;visibility:hidden;background-color:var(--ma-bg);";
-    overlay.appendChild(probe);
-    const rgb = parseColorToRgb(getComputedStyle(probe).backgroundColor);
-    probe.remove();
-    if (!rgb) return;
-    const [r, g, b] = rgb;
-    const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-    overlay.style.colorScheme = luminance < 0.5 ? "dark" : "light";
-  } catch {
-    // Purely cosmetic - leave the browser default.
-  }
 }
 
 // ---------------------------------------------------------------------
@@ -229,8 +301,11 @@ class ModelAnalyticsDashboard {
     this.sortState = { used: { col: "last_activity", dir: -1 }, unused: { col: "size_bytes", dir: -1 }, disabled: { col: "size_bytes", dir: -1 } };
     this.selectedWorkflow = null;
     this.overlay = null;
-    this.themeObserver = null;
     this.usedThresholdDays = DEFAULT_RECENCY_DAYS;
+    this.custom = { colors: {} };
+    this.paletteSnapshot = null;
+    this.openAppearancePanel = null;
+    this.executionRefreshTimer = null;
     // Whether the "Used within last N days" window applies at all. When
     // off, any past load (or a workflow reference) counts as used.
     // Both values live in the ComfyUI settings (see loadSettings()).
@@ -243,6 +318,10 @@ class ModelAnalyticsDashboard {
   loadSettings() {
     this.tr = createTranslator(resolveLanguage());
     this.settings = currentSettings();
+    this.custom = parseCustomAppearance(this.settings.customAppearance);
+    if (this.openAppearancePanel === null) {
+      this.openAppearancePanel = this.settings.appearance === "custom" ? "custom" : "themes";
+    }
     const recency = readRecency();
     this.usedThresholdEnabled = recency.enabled;
     this.usedThresholdDays = recency.days;
@@ -258,15 +337,15 @@ class ModelAnalyticsDashboard {
 
   async open() {
     injectCss();
+    if (this.overlay) this.close();
     this.loadSettings();
+    this.resolvePaletteSnapshot();
     this.activeTab = this.settings.defaultTab;
     this.buildModal();
     await this.refresh();
   }
 
   close() {
-    this.themeObserver?.disconnect();
-    this.themeObserver = null;
     if (this.overlay) {
       this.overlay.remove();
       this.overlay = null;
@@ -276,16 +355,40 @@ class ModelAnalyticsDashboard {
   // Called by the ComfyUI settings system when one of our settings
   // changes while the dashboard is open.
   onSettingsChanged() {
-    // The recency window has its own handler (it needs fresh server data
-    // and must not rebuild the header while someone is typing in it).
     const recency = { enabled: this.usedThresholdEnabled, days: this.usedThresholdDays };
+    const previous = this.settings;
+    const previousLanguage = this.tr.code;
     this.loadSettings();
+    this.resolvePaletteSnapshot();
     this.usedThresholdEnabled = recency.enabled;
     this.usedThresholdDays = recency.days;
     if (!this.overlay) return;
-    this.close();
-    this.buildModal();
-    if (this.data) this.render();
+
+    if (this.tr.code !== previousLanguage || this.settings.starBanner !== previous.starBanner) {
+      this.close();
+      this.buildModal();
+      if (this.data) this.render();
+      return;
+    }
+
+    this.applyLiveSettings();
+    const changed = ["appearancePreference", "paletteId", "sizeUnit", "dateFormat", "density"].some((key) => previous[key] !== this.settings[key]);
+    if (changed) this.render();
+  }
+
+  applyLiveSettings() {
+    const modal = this.overlay?.querySelector(".ma-modal");
+    modal?.classList.toggle("ma-density-compact", this.settings.density === "compact");
+    if (this.overlay) applyAppearance(this.overlay, this.settings.appearance, this.custom, this.paletteSnapshot);
+  }
+
+  scheduleExecutionRefresh() {
+    if (!this.overlay) return;
+    if (this.executionRefreshTimer) clearTimeout(this.executionRefreshTimer);
+    this.executionRefreshTimer = setTimeout(() => {
+      this.executionRefreshTimer = null;
+      if (this.overlay) this.refresh({ quiet: this.activeTab === "settings" });
+    }, 450);
   }
 
   // Applies a new recency window (from the header, the Settings tab or
@@ -322,19 +425,17 @@ class ModelAnalyticsDashboard {
 
   buildModal() {
     const overlay = document.createElement("div");
-    overlay.className = "ma-overlay";
+    overlay.className = "ma-overlay ma-scope";
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) this.close();
     });
 
     const showBanner = this.settings.starBanner;
     const densityClass = this.settings.density === "compact" ? " ma-density-compact" : "";
-    overlay.dataset.maTheme = this.settings.theme;
-
     overlay.innerHTML = `
-      <div class="ma-modal${densityClass}" role="dialog" aria-modal="true" aria-label="${this.h("app.title")}">
+      <div class="ma-modal${densityClass}${showBanner ? " ma-modal--banner" : ""}" role="dialog" aria-modal="true" aria-label="${this.h("app.title")}">
         <div class="ma-header">
-          <h2>📊 ${this.h("app.title")}</h2>
+          <h2 class="ma-title"><i class="pi pi-chart-bar" aria-hidden="true"></i>${this.h("app.title")}</h2>
           <div class="ma-header-right">
             <label class="ma-stale-control" title="${this.h("header.recency.tooltip")}">
               <input type="checkbox" class="ma-stale-toggle" ${this.usedThresholdEnabled ? "checked" : ""} />
@@ -342,7 +443,7 @@ class ModelAnalyticsDashboard {
               <input type="number" class="ma-stale-input" min="1" step="1" value="${escapeHtml(this.usedThresholdDays)}" ${this.usedThresholdEnabled ? "" : "disabled"} />
               ${this.h("header.recency.after")}
             </label>
-            <a class="ma-btn ma-btn-accent ma-star-btn" href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer" title="${this.h("star.tooltip")}">${this.h("star.button")}</a>
+            <a class="ma-btn ma-btn-accent ma-star-btn ma-star-header" href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer" title="${this.h("star.tooltip")}">${this.h("star.button")}</a>
             <button type="button" class="ma-btn ma-btn-ghost ma-btn-icon ma-close-btn" title="${this.h("common.close")}" aria-label="${this.h("common.close")}">✕</button>
           </div>
         </div>
@@ -354,7 +455,7 @@ class ModelAnalyticsDashboard {
         </div>
         ` : ""}
         <div class="ma-tabs" role="tablist">
-          ${TABS.map((tab) => `<button type="button" role="tab" class="ma-tab-btn" data-tab="${tab}">${this.h(`tab.${tab}`)}</button>`).join("")}
+          ${TABS.map((tab) => `<button type="button" role="tab" class="ma-tab-btn" data-tab="${tab}">${this.h(`tab.${tab}`)}<span class="ma-tab-count" hidden></span></button>`).join("")}
         </div>
         <div class="ma-body">
           <div class="ma-summary">${this.h("common.loading")}</div>
@@ -364,12 +465,12 @@ class ModelAnalyticsDashboard {
 
     const bannerDismiss = overlay.querySelector(".ma-star-banner-dismiss");
     if (bannerDismiss) {
-      bannerDismiss.addEventListener("click", () => {
-        // Remove it right away; the setting makes the choice permanent
-        // (and re-enableable in Settings -> Model Analytics).
+      bannerDismiss.addEventListener("click", async () => {
+        // Hide it immediately, then persist the dismissal in ComfyUI settings.
         this.settings.starBanner = false;
         overlay.querySelector(".ma-star-banner")?.remove();
-        writeSetting(SETTING.starBanner, false);
+        overlay.querySelector(".ma-modal")?.classList.remove("ma-modal--banner");
+        await writeSetting(SETTING.starBannerDismissed, true);
       });
     }
 
@@ -380,7 +481,9 @@ class ModelAnalyticsDashboard {
         this.render();
       });
     });
-    this.attachSettingsHandlers(overlay.querySelector(".ma-body"));
+    const body = overlay.querySelector(".ma-body");
+    this.attachSettingsHandlers(body);
+    this.attachAppearanceHandlers(body);
 
     const staleInput = overlay.querySelector(".ma-stale-input");
     staleInput.addEventListener("change", async () => {
@@ -404,48 +507,59 @@ class ModelAnalyticsDashboard {
 
     document.body.appendChild(overlay);
     this.overlay = overlay;
-    applyColorScheme(overlay);
-
-    // Theme colours update automatically through CSS variables. Observe the
-    // root/body theme attributes as well so native controls also switch their
-    // light/dark colour scheme while the dashboard remains open.
-    if (typeof MutationObserver !== "undefined") {
-      this.themeObserver = new MutationObserver(() => applyColorScheme(overlay));
-      const observerOptions = { attributes: true, attributeFilter: ["class", "style", "data-theme"] };
-      this.themeObserver.observe(document.documentElement, observerOptions);
-      this.themeObserver.observe(document.body, observerOptions);
-    }
+    applyAppearance(overlay, this.settings.appearance, this.custom, this.paletteSnapshot);
   }
 
-  async refresh() {
+  async refresh({ quiet = false } = {}) {
     try {
       const thresholdParam = this.usedThresholdEnabled ? this.usedThresholdDays : "off";
-      const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(thresholdParam)}`);
+      const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(thresholdParam)}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this.data = await res.json();
     } catch (e) {
       const body = this.overlay?.querySelector(".ma-body");
-      if (body) {
+      if (body && !quiet) {
         body.innerHTML = `<div class="ma-empty-state">${this.h("common.loadError", { message: e.message })}</div>`;
       }
       return;
     }
-    this.render();
+    this.render({ preserveSettings: quiet && this.activeTab === "settings" });
   }
 
-  render() {
+  tabCounts() {
+    if (!this.data) return {};
+    const stats = calculateInventoryStats(this.data.models || []);
+    return {
+      used: stats.used.length,
+      unused: stats.unused.length,
+      disabled: stats.disabled.length,
+      workflow: (this.data.workflow_names || []).length,
+    };
+  }
+
+  render({ preserveSettings = false } = {}) {
     if (!this.overlay) return;
+    const counts = this.tabCounts();
     this.overlay.querySelectorAll(".ma-tab-btn").forEach((btn) => {
       const active = btn.dataset.tab === this.activeTab;
       btn.classList.toggle("active", active);
       btn.setAttribute("aria-selected", active ? "true" : "false");
+      const badge = btn.querySelector(".ma-tab-count");
+      const count = counts[btn.dataset.tab];
+      if (badge) {
+        badge.hidden = count === undefined;
+        if (count !== undefined) badge.textContent = String(count);
+      }
     });
 
     const body = this.overlay.querySelector(".ma-body");
+    if (preserveSettings && this.activeTab === "settings") return;
     if (this.activeTab === "settings") {
+      body.classList.add("ma-body-settings");
       body.innerHTML = this.renderSettingsTab();
       return;
     }
+    body.classList.remove("ma-body-settings");
     if (!this.data) {
       body.innerHTML = `<div class="ma-empty-state">${this.h("common.noData")}</div>`;
       return;
@@ -465,17 +579,21 @@ class ModelAnalyticsDashboard {
     this.attachWorkflowSelectHandler(body);
   }
 
+  // Builds native select options for the custom appearance editor. Keep this
+  // helper on the dashboard class so Settings can render independently of the
+  // currently selected data tab.
+  optionsHtml(options, value) {
+    return options.map((option) =>
+      `<option value="${escapeHtml(option.value)}" ${option.value === value ? "selected" : ""}>${escapeHtml(option.text)}</option>`,
+    ).join("");
+  }
+
   settingOptions(id) {
     const tr = this.tr;
     const choices = {
       [SETTING.language]: [
         { value: LANGUAGE_AUTO, text: tr.t("settings.language.auto") },
         ...LANGUAGES.map((language) => ({ value: language.code, text: language.label })),
-      ],
-      [SETTING.theme]: [
-        { value: "auto", text: tr.t("settings.theme.auto") },
-        { value: "dark", text: tr.t("settings.theme.dark") },
-        { value: "light", text: tr.t("settings.theme.light") },
       ],
       [SETTING.sizeUnit]: [
         { value: "binary", text: tr.t("settings.sizeUnit.binary") },
@@ -533,10 +651,112 @@ class ModelAnalyticsDashboard {
     `;
   }
 
+  renderAppearanceSettings() {
+    const selectedId = this.settings.paletteId;
+    const choices = getComfyPaletteChoices();
+    const currentName = this.settings.appearance === "custom"
+      ? this.t("settings.appearance.custom")
+      : this.settings.appearance === "palette"
+        ? (choices.find((item) => item.id === selectedId)?.name || selectedId)
+        : this.t("settings.appearance.follow");
+    const themeChoices = choices.map((palette) => `
+      <button type="button" class="ma-theme-choice${this.settings.appearance === "palette" && selectedId === palette.id ? " is-selected" : ""}" data-ma-theme="${escapeHtml(palette.id)}" aria-pressed="${this.settings.appearance === "palette" && selectedId === palette.id ? "true" : "false"}">
+        <span class="ma-theme-swatch" aria-hidden="true"></span>
+        <span class="ma-theme-choice-label">${escapeHtml(palette.name)}</span>
+        ${this.settings.appearance === "palette" && selectedId === palette.id ? '<i class="pi pi-check" aria-hidden="true"></i>' : ""}
+      </button>
+    `).join("");
+    const themesExpanded = this.openAppearancePanel === "themes";
+    const customExpanded = this.openAppearancePanel === "custom";
+    return `
+      <div class="ma-appearance-stack">
+        <section class="ma-appearance-card${themesExpanded ? " is-open" : ""}">
+          <button type="button" class="ma-appearance-disclosure" data-ma-appearance-toggle="themes" aria-expanded="${themesExpanded}">
+            <span class="ma-appearance-leading"><i class="pi pi-palette" aria-hidden="true"></i></span>
+            <span class="ma-appearance-copy">
+              <span class="ma-appearance-title">${this.h("settings.appearance.themes")}</span>
+              <span class="ma-appearance-subtitle">${escapeHtml(currentName)}</span>
+            </span>
+            <i class="pi ${themesExpanded ? "pi-chevron-up" : "pi-chevron-down"} ma-appearance-chevron" aria-hidden="true"></i>
+          </button>
+          <div class="ma-theme-panel" ${themesExpanded ? "" : "hidden"}>
+            <button type="button" class="ma-theme-choice ma-theme-follow${this.settings.appearance === "follow" ? " is-selected" : ""}" data-ma-theme="follow" aria-pressed="${this.settings.appearance === "follow" ? "true" : "false"}">
+              <span class="ma-theme-follow-icon"><i class="pi pi-desktop" aria-hidden="true"></i></span>
+              <span class="ma-theme-choice-copy"><span class="ma-theme-choice-label">${this.h("settings.appearance.follow")}</span><span class="ma-theme-choice-hint">${this.h("settings.appearance.followHint")}</span></span>
+              ${this.settings.appearance === "follow" ? '<i class="pi pi-check" aria-hidden="true"></i>' : ""}
+            </button>
+            <div class="ma-theme-grid">${themeChoices}</div>
+          </div>
+        </section>
+        <section class="ma-appearance-card${customExpanded ? " is-open" : ""}">
+          <button type="button" class="ma-appearance-disclosure" data-ma-appearance-toggle="custom" aria-expanded="${customExpanded}">
+            <span class="ma-appearance-leading"><i class="pi pi-sliders-h" aria-hidden="true"></i></span>
+            <span class="ma-appearance-copy">
+              <span class="ma-appearance-title">${this.h("settings.appearance.custom")}</span>
+              <span class="ma-appearance-subtitle">${this.h("settings.appearance.customHint")}</span>
+            </span>
+            <i class="pi ${customExpanded ? "pi-chevron-up" : "pi-chevron-down"} ma-appearance-chevron" aria-hidden="true"></i>
+          </button>
+          <div class="ma-custom-panel" ${customExpanded ? "" : "hidden"}>
+            ${this.renderCustomAppearance()}
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  // The optional editor for advanced users. Unset colours inherit from the
+  // active ComfyUI palette; overrides remain scoped to Model Analytics.
+  renderCustomAppearance() {
+    const colors = this.custom.colors;
+    const tokens = COLOR_TOKENS.map((token) => {
+      const stored = colors[token.id];
+      const hex = stored || (this.overlay ? effectiveTokenHex(this.overlay, token.id) : "#000000");
+      const label = this.h(token.labelKey);
+      return `
+        <div class="ma-token" data-token-row="${token.id}">
+          <span class="ma-token-label">${label}</span>
+          <span class="ma-token-value" data-set="${stored ? "true" : "false"}">${stored ? escapeHtml(stored) : this.h("settings.custom.inherited")}</span>
+          <input class="ma-color" type="color" data-ma-token="${token.id}" value="${escapeHtml(hex)}" aria-label="${label}" />
+          <button type="button" class="ma-btn ma-btn--ghost ma-btn--icon" data-ma-reset-token="${token.id}" title="${this.h("settings.custom.resetValue")}" aria-label="${this.h("settings.custom.resetValue")}" ${stored ? "" : "disabled"}><i class="pi pi-undo" aria-hidden="true"></i></button>
+        </div>
+      `;
+    }).join("");
+
+    const radius = `<input class="ma-input" type="number" min="${RADIUS_RANGE.min}" max="${RADIUS_RANGE.max}" step="1" data-ma-custom="radius" value="${this.custom.radius ?? ""}" placeholder="${RADIUS_RANGE.fallback}" aria-label="${this.h("settings.custom.radius")}" />`;
+    const fontSize = `<input class="ma-input" type="number" min="${FONT_SIZE_RANGE.min}" max="${FONT_SIZE_RANGE.max}" step="1" data-ma-custom="fontSize" value="${this.custom.fontSize ?? ""}" placeholder="${FONT_SIZE_RANGE.fallback}" aria-label="${this.h("settings.custom.fontSize")}" />`;
+    const schemeOptions = SCHEMES.map((scheme) => ({ value: scheme, text: this.t(`settings.custom.scheme.${scheme}`) }));
+    const scheme = `<select class="ma-select" data-ma-custom="scheme" aria-label="${this.h("settings.custom.scheme.name")}">${this.optionsHtml(schemeOptions, this.custom.scheme || "inherit")}</select>`;
+
+    return `
+      <section class="ma-section">
+        <h3 class="ma-section-title">${this.h("settings.custom.group")}</h3>
+        <p class="ma-section-note">${this.h("settings.custom.note")}</p>
+        <div class="ma-tokens">${tokens}</div>
+        ${this.customAppearanceRow("settings.custom.radius", "", radius)}
+        ${this.customAppearanceRow("settings.custom.fontSize", "", fontSize)}
+        ${this.customAppearanceRow("settings.custom.scheme.name", "settings.custom.scheme.hint", scheme)}
+        <div class="ma-actions">
+          <button type="button" class="ma-btn" data-ma-reset-all>${this.h("settings.custom.resetAll")}</button>
+        </div>
+      </section>
+    `;
+  }
+
+  customAppearanceRow(titleKey, hintKey, controlHtml) {
+    return `
+      <label class="ma-custom-row">
+        <span class="ma-custom-row-copy">
+          <span class="ma-custom-row-title">${this.h(titleKey)}</span>
+          ${hintKey ? `<span class="ma-custom-row-hint">${this.h(hintKey)}</span>` : ""}
+        </span>
+        ${controlHtml}
+      </label>
+    `;
+  }
+
   renderSettingsTab() {
     const language = readChoice(SETTING.language, [LANGUAGE_AUTO, ...LANGUAGES.map((item) => item.code)], LANGUAGE_AUTO);
-    const theme = readChoice(SETTING.theme, DASHBOARD_THEMES, "auto");
-    const starBanner = this.settings.starBanner;
     return `
       <div class="ma-settings-page">
         <p class="ma-settings-intro">${this.h("settings.panel.description")}</p>
@@ -546,7 +766,7 @@ class ModelAnalyticsDashboard {
         </section>
         <section class="ma-settings-section">
           <h3>${this.h("settings.group.appearance")}</h3>
-          ${this.renderSettingSelect(SETTING.theme, "settings.theme.name", "settings.theme.tooltip", theme)}
+          ${this.renderAppearanceSettings()}
           ${this.renderSettingSelect(SETTING.density, "settings.density.name", "settings.density.tooltip", this.settings.density)}
         </section>
         <section class="ma-settings-section">
@@ -559,7 +779,6 @@ class ModelAnalyticsDashboard {
           ${this.renderSettingSelect(SETTING.sizeUnit, "settings.sizeUnit.name", "settings.sizeUnit.tooltip", this.settings.sizeUnit)}
           ${this.renderSettingSelect(SETTING.dateFormat, "settings.dateFormat.name", "settings.dateFormat.tooltip", this.settings.dateFormat)}
           ${this.renderSettingSelect(SETTING.defaultTab, "settings.defaultTab.name", "settings.defaultTab.tooltip", this.settings.defaultTab)}
-          ${this.renderSettingToggle(SETTING.starBanner, "settings.starBanner.name", "settings.starBanner.tooltip", starBanner)}
         </section>
         <p class="ma-settings-feedback" role="status" aria-live="polite"></p>
       </div>
@@ -619,6 +838,133 @@ class ModelAnalyticsDashboard {
     });
   }
 
+  // Handlers of the Custom appearance editor. Colour pickers preview live
+  // while dragging ("input") and are stored once, when the picker commits
+  // ("change"), so ComfyUI's settings are not written on every mouse move.
+  setFeedback(message) {
+    const node = this.overlay?.querySelector(".ma-settings-feedback");
+    if (node) node.textContent = message;
+  }
+
+  attachAppearanceHandlers(root) {
+    if (!root || root.dataset.maAppearanceHandlers === "true") return;
+    root.dataset.maAppearanceHandlers = "true";
+
+    root.addEventListener("input", (event) => {
+      const picker = event.target?.closest?.("[data-ma-token]");
+      if (picker && root.contains(picker)) this.previewToken(picker.dataset.maToken, picker.value);
+    });
+
+    root.addEventListener("change", async (event) => {
+      const control = event.target?.closest?.("[data-ma-token], [data-ma-custom]");
+      if (!control || !root.contains(control)) return;
+      if (control.dataset.maToken) {
+        this.previewToken(control.dataset.maToken, control.value);
+      } else {
+        this.updateCustomOption(control);
+      }
+      await this.saveCustom();
+    });
+
+    root.addEventListener("click", async (event) => {
+      const toggle = event.target?.closest?.("[data-ma-appearance-toggle]");
+      if (toggle && root.contains(toggle)) {
+        const panel = toggle.dataset.maAppearanceToggle;
+        this.openAppearancePanel = this.openAppearancePanel === panel ? null : panel;
+        if (panel === "custom" && this.openAppearancePanel === "custom") {
+          await this.saveAppearancePreference("custom");
+        }
+        this.render();
+        return;
+      }
+
+      const themeChoice = event.target?.closest?.("[data-ma-theme]");
+      if (themeChoice && root.contains(themeChoice)) {
+        const id = themeChoice.dataset.maTheme;
+        await this.saveAppearancePreference(id === "follow" ? "follow" : `palette:${id}`);
+        this.openAppearancePanel = "themes";
+        this.loadSettings();
+        this.resolvePaletteSnapshot();
+        this.render();
+        this.applyLiveSettings();
+        return;
+      }
+
+      const resetToken = event.target?.closest?.("[data-ma-reset-token]");
+      const resetAll = event.target?.closest?.("[data-ma-reset-all]");
+      if (!(resetToken || resetAll) || !root.contains(event.target)) return;
+      if (resetAll) {
+        this.custom = { colors: {} };
+      } else {
+        const { [resetToken.dataset.maResetToken]: _unset, ...rest } = this.custom.colors;
+        this.custom.colors = rest;
+      }
+      applyAppearance(this.overlay, this.settings.appearance, this.custom, this.paletteSnapshot);
+      this.render();
+      await this.saveCustom();
+    });
+  }
+
+  resolvePaletteSnapshot() {
+    if (this.settings.appearance !== "palette" || !this.settings.paletteId) {
+      this.paletteSnapshot = null;
+      return;
+    }
+    const paletteStore = getComfyPaletteStore();
+    const activeId = readSetting("Comfy.ColorPalette", "dark");
+    this.paletteSnapshot = readComfyPaletteSnapshot(
+      paletteStore,
+      this.settings.paletteId,
+      activeId,
+      getCustomComfyPalettes(),
+    );
+    if (!this.paletteSnapshot) {
+      this.setFeedback(this.t("settings.appearance.paletteUnavailable"));
+    }
+  }
+
+  async saveAppearancePreference(preference) {
+    this.setFeedback("");
+    const saved = await writeSetting(SETTING.appearance, normalizeAppearancePreference(preference));
+    if (!saved) this.setFeedback(this.t("settings.saveError"));
+  }
+
+  previewToken(id, value) {
+    if (!HEX_COLOR.test(value) || !COLOR_TOKENS.some((token) => token.id === id)) return;
+    this.custom.colors[id] = value.toLowerCase();
+    applyAppearance(this.overlay, this.settings.appearance, this.custom, this.paletteSnapshot);
+    const row = this.overlay?.querySelector(`[data-token-row="${id}"]`);
+    if (!row) return;
+    const label = row.querySelector(".ma-token-value");
+    label.textContent = value.toLowerCase();
+    label.dataset.set = "true";
+    row.querySelector("[data-ma-reset-token]").disabled = false;
+  }
+
+  updateCustomOption(control) {
+    const key = control.dataset.maCustom;
+    if (key === "scheme") {
+      this.custom.scheme = control.value === "inherit" ? undefined : control.value;
+    } else {
+      const range = key === "radius" ? RADIUS_RANGE : FONT_SIZE_RANGE;
+      const number = parseFloat(control.value);
+      if (Number.isFinite(number)) {
+        this.custom[key] = Math.min(range.max, Math.max(range.min, Math.round(number)));
+        control.value = String(this.custom[key]);
+      } else {
+        this.custom[key] = undefined;
+        control.value = "";
+      }
+    }
+    applyAppearance(this.overlay, this.settings.appearance, this.custom, this.paletteSnapshot);
+  }
+
+  async saveCustom() {
+    this.setFeedback("");
+    const saved = await writeSetting(SETTING.customAppearance, serializeCustomAppearance(this.custom));
+    if (!saved) this.setFeedback(this.t("settings.saveError"));
+  }
+
   size(bytes) {
     return formatBytes(bytes, this.settings.sizeUnit);
   }
@@ -658,7 +1004,8 @@ class ModelAnalyticsDashboard {
   }
 
   renderUsedTab() {
-    const used = this.data.models.filter((m) => !m.unused && !m.disabled);
+    const stats = calculateInventoryStats(this.data.models || []);
+    const used = stats.used;
     const state = this.sortState.used;
     const sorted = this.sortRows(used, state.col, state.dir);
     const variant = this.usedThresholdEnabled ? "window" : "all";
@@ -669,7 +1016,7 @@ class ModelAnalyticsDashboard {
     }
 
     return `
-      <div class="ma-summary">${this.h(`used.summary.${variant}`, { used: bold(used.length), total: bold(this.data.total_models), days })}</div>
+      <div class="ma-summary">${this.h(`used.summary.${variant}`, { used: bold(used.length), total: bold(stats.used.length + stats.unused.length), days })}</div>
       <div class="ma-table-scroll">
         <table class="ma-table" data-table="used">
           <thead>
@@ -702,10 +1049,11 @@ class ModelAnalyticsDashboard {
   }
 
   renderUnusedTab() {
-    const unused = this.data.models.filter((m) => m.unused && !m.disabled);
+    const stats = calculateInventoryStats(this.data.models || []);
+    const unused = stats.unused;
     const state = this.sortState.unused;
     const sorted = this.sortRows(unused, state.col, state.dir);
-    const totalBytes = this.data.total_unused_bytes;
+    const totalBytes = stats.unusedBytes;
     const variant = this.usedThresholdEnabled ? "window" : "all";
 
     if (!sorted.length) {
@@ -740,16 +1088,18 @@ class ModelAnalyticsDashboard {
   }
 
   renderDisabledTab() {
-    const disabled = this.data.models.filter((m) => m.disabled);
+    const stats = calculateInventoryStats(this.data.models || []);
+    const disabled = stats.disabled;
     const state = this.sortState.disabled;
     const sorted = this.sortRows(disabled, state.col, state.dir);
+    const disabledBytes = stats.disabledBytes;
 
     if (!sorted.length) {
       return `<div class="ma-empty-state">${this.h("disabled.empty")}</div>`;
     }
 
     return `
-      <div class="ma-summary">${this.h("disabled.summary", { count: bold(sorted.length), suffix: code(".disabled"), size: bold(this.size(this.data.total_disabled_bytes || 0)) })}</div>
+      <div class="ma-summary">${this.h("disabled.summary", { count: bold(sorted.length), suffix: code(".disabled"), size: bold(this.size(disabledBytes)) })}</div>
       <div class="ma-table-scroll">
         <table class="ma-table" data-table="disabled">
           <thead>
@@ -862,8 +1212,14 @@ const actionBarButtons = [];
 function updateMenuButtonLabel() {
   if (!menuButton) return;
   const tr = createTranslator(resolveLanguage());
-  menuButton.textContent = `📊 ${tr.t("app.menuButton")}`;
+  let label = menuButton.querySelector(".ma-menu-btn-label");
+  if (!label) {
+    menuButton.innerHTML = '<span class="ma-menu-btn-icon"><i class="pi pi-chart-bar" aria-hidden="true"></i></span><span class="ma-menu-btn-label"></span>';
+    label = menuButton.querySelector(".ma-menu-btn-label");
+  }
+  label.textContent = tr.t("app.menuButton");
   menuButton.title = tr.t("action.open");
+  menuButton.setAttribute("aria-label", tr.t("action.open"));
 }
 
 function updateActionBarButtons() {
@@ -981,23 +1337,26 @@ function buildSettingsDefinitions() {
       "used",
     ),
     {
-      id: SETTING.starBanner,
-      name: t("settings.starBanner.name"),
-      category: [section, display, t("settings.starBanner.name")],
-      type: "boolean",
-      tooltip: t("settings.starBanner.tooltip"),
-      defaultValue: true,
+      id: SETTING.starBannerDismissed,
+      name: "Model Analytics star banner dismissed",
+      type: "hidden",
+      defaultValue: false,
       onChange: onAnySettingChanged,
     },
-    combo(
-      SETTING.theme, t("settings.group.appearance"), "settings.theme.name", "settings.theme.tooltip",
-      [
-        { text: t("settings.theme.auto"), value: "auto" },
-        { text: t("settings.theme.dark"), value: "dark" },
-        { text: t("settings.theme.light"), value: "light" },
-      ],
-      "auto",
-    ),
+    {
+      id: SETTING.appearance,
+      name: "Model Analytics appearance preference",
+      type: "hidden",
+      defaultValue: "follow",
+      onChange: onAnySettingChanged,
+    },
+    {
+      id: SETTING.customAppearance,
+      name: "Model Analytics custom appearance values",
+      type: "hidden",
+      defaultValue: "",
+      onChange: onAnySettingChanged,
+    },
   ];
 }
 
@@ -1007,7 +1366,7 @@ function buildSettingsDefinitions() {
 async function migrateLegacyLocalPreferences() {
   try {
     if (localStorage.getItem(LEGACY_STAR_BANNER_DISMISSED_KEY)) {
-      const migrated = await writeSetting(SETTING.starBanner, false);
+      const migrated = await writeSetting(SETTING.starBannerDismissed, true);
       if (migrated) localStorage.removeItem(LEGACY_STAR_BANNER_DISMISSED_KEY);
     }
 
@@ -1030,12 +1389,16 @@ async function migrateLegacyLocalPreferences() {
 }
 
 // Entry point for ComfyUI's legacy menu (Settings -> Comfy -> "Use new
-// menu" = Disabled) and for old frontends without the new menu API. The
-// button is created in any case; when the legacy menu is not shown, its
-// container is hidden by ComfyUI, so it never appears twice.
+// menu" = Disabled) and for older frontends without the modern action bar.
+// Modern-menu mode uses the native action-bar button instead.
 function addLegacyMenuButton() {
+  // ComfyUI can re-run extension setup during frontend reloads. Remove a
+  // previous instance first so the same extension never leaves duplicate
+  // visible buttons behind.
+  document.querySelectorAll("[data-ma-menu-button='true']").forEach((button) => button.remove());
   menuButton = document.createElement("button");
   menuButton.type = "button";
+  menuButton.dataset.maMenuButton = "true";
   menuButton.className = "comfy-menu-btn ma-btn ma-menu-btn";
   updateMenuButtonLabel();
   menuButton.addEventListener("click", () => {
@@ -1067,7 +1430,11 @@ function openDashboard() {
 }
 
 registeredSettings = buildSettingsDefinitions();
-{
+// Exactly one visible entry point: the styled menu button in legacy-menu
+// mode, or the native action-bar button in the modern menu. Do not also add
+// an Extensions menu command, which would create a second Model Analytics
+// entry beside the button.
+if (!legacyMenuInUse()) {
   const { t } = createTranslator(resolveLanguage());
   actionBarButtons.push({
     icon: "pi pi-chart-bar",
@@ -1088,16 +1455,21 @@ app.registerExtension({
       function: openDashboard,
     },
   ],
-  // New ComfyUI menu: Extensions -> Model Analytics, plus a button in the
-  // top action bar.
-  menuCommands: [
-    { path: ["Extensions"], commands: ["ModelAnalytics.Open"] },
-  ],
+  // The legacy menu needs its own styled button. Modern ComfyUI uses the
+  // single native action-bar entry registered above.
   actionBarButtons,
   async setup() {
     injectCss();
     await migrateLegacyLocalPreferences();
     dashboard = new ModelAnalyticsDashboard();
-    addLegacyMenuButton();
+    if (legacyMenuInUse()) addLegacyMenuButton();
+    const api = app.api;
+    if (api?.addEventListener && !api.__modelAnalyticsRefreshBound) {
+      const refreshInventory = () => dashboard?.scheduleExecutionRefresh();
+      for (const eventName of ["execution_start", "execution_success", "execution_error", "execution_interrupted"]) {
+        api.addEventListener(eventName, refreshInventory);
+      }
+      api.__modelAnalyticsRefreshBound = true;
+    }
   },
 });
