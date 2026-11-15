@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-Model-Analytics"
 description = "Shows which models you actually use vs. which are just wasting disk space. Read-only, no deletion."
-version = "1.4.3"
+version = "1.4.4"
 license = "MIT"
 keywords = [
     "model management",
