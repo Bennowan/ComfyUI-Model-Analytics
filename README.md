@@ -2,12 +2,13 @@
 
 A lightweight, read-only custom node for ComfyUI that helps you figure out which models you actually use and which ones are just wasting disk space.
 
-https://github.com/user-attachments/assets/7dfe80a5-28de-42bc-8989-bc9301c4389b
+[video-v1.4.4.webm](https://github.com/user-attachments/assets/8d2e397a-dd92-41e0-8d5d-3c3fe1f0a38e)
+
 
 <table>
   <tr>
-    <td><img src="./.docs/used-models.png" alt="Used Models tab" width="480"/></td>
-    <td><img src="./.docs/unused-models.png" alt="Unused Models tab" width="480"/></td>
+    <td><img src="./.docs/used-models-v1.4.4.png" alt="Used Models tab" width="480"/></td>
+    <td><img src="./.docs/unused-models-v1.4.4.png" alt="Unused Models tab" width="480"/></td>
   </tr>
   <tr>
     <td align="center"><sub>Used Models</sub></td>
