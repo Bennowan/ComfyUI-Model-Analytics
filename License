@@ -1,22 +1,160 @@
+# Bennowan Community Non-Commercial License (BCNCL) v1.0
+
 Copyright (c) 2026 Bennowan
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including the rights to use, copy, modify,
-merge, publish, distribute, sublicense, and/or sell copies of the Software,
-subject to the following conditions:
+This license applies to the software project **ComfyUI-Model-Analytics**, including its source code and accompanying documentation authored by Bennowan (the "Project").
 
-1. The above copyright notice and this permission notice shall be included in all
-   copies or substantial portions of the Software, with prominent credit given to
-   the original author, Bennowan.
+The official Project repository is:
 
-2. The Software and any derivative works may NOT be used for commercial purposes,
-   monetization, or direct financial gain of any kind.
+https://github.com/Bennowan/ComfyUI-Model-Analytics
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+By using, copying, modifying, or distributing the Project, you agree to the following terms.
+
+## 1. Grant of Rights
+
+Subject to the conditions of this license, permission is hereby granted to any person obtaining a copy of the Project to:
+
+- Use and run the Project for personal, educational, research, and other non-commercial purposes.
+- Inspect and study the source code.
+- Modify the source code for personal or non-commercial development.
+- Create non-commercial derivative works, subject to the requirements in this license.
+- Prepare and submit bug fixes, improvements, and other contributions to the official Project repository.
+
+These permissions are non-exclusive, worldwide, royalty-free, and limited by the conditions stated below.
+
+## 2. Strict Non-Commercial Use
+
+**The Project and all derivative works must remain strictly non-commercial.**
+
+No person or organization may use the Project, its source code, or derivative works for direct or indirect financial gain or commercial advantage.
+
+Prohibited activities include, but are not limited to:
+
+- Selling the Project, modified versions, extensions, or bundled copies.
+- Charging fees, subscriptions, or payments for access to or use of the Project.
+- Offering paid hosting, installation, maintenance, consulting, or support based on the Project.
+- Generating advertising, sponsorship, donation, subscription, or crowdfunding revenue through the Project or a derivative work.
+- Including the Project in a paid product, commercial service, or revenue-generating offering.
+- Using the Project as part of business or professional activities intended to generate revenue or another commercial benefit.
+
+This restriction applies regardless of whether the financial benefit is received directly by the person using the Project or indirectly by another person or organization.
+
+**No commercial-use exception is granted by this license.** Separate written permission from the copyright holder is required for any commercial use.
+
+## 3. Official Project and Redistribution
+
+The official version of the Project is maintained by **Bennowan** in the official repository identified above.
+
+### 3.1 No independent mirrors
+
+You may not publish, distribute, offer for download, or maintain an unchanged or substantially identical copy of the Project as a separate, independently maintained project.
+
+This includes, for example:
+
+- Re-uploading the Project under another repository or project identity.
+- Maintaining a separate copy that primarily mirrors the official repository.
+- Regularly synchronizing the official repository into a separate public project without substantial independent development.
+- Publishing repackaged copies with only cosmetic, naming, documentation, or metadata changes.
+
+Simply renaming the Project or changing its appearance does not create an independently developed derivative work.
+
+### 3.2 Development forks and contributions
+
+Forks created through GitHub's native repository-forking functionality are permitted for collaborative development, code review, testing, and the preparation or submission of contributions.
+
+Such forks must:
+
+- Clearly identify the original Project and its official repository.
+- Preserve the original copyright and license notices.
+- Not claim to be the official Project.
+- Not be presented as the official replacement for the original Project.
+
+This section does not attempt to restrict rights that GitHub independently grants through its Terms of Service for native GitHub forks.
+
+### 3.3 Independent non-commercial derivative projects
+
+You may distribute a genuinely modified derivative of the Project for non-commercial purposes, provided that:
+
+- The derivative contains substantial independent development or meaningful additional functionality.
+- It is clearly presented as an unofficial, independently developed derivative.
+- It uses a distinct project name and does not create confusion about its official status.
+- The original Project and Bennowan are clearly credited.
+- The original repository is linked prominently.
+- All other conditions of this license are followed.
+
+A derivative must not primarily consist of a copy of the original Project with routine updates or minor cosmetic changes.
+
+## 4. Attribution and Copyright
+
+The original copyright notice and this license must be included in all copies or substantial portions of the Project.
+
+Any publicly distributed derivative must display a prominent notice substantially equivalent to:
+
+"Based on ComfyUI-Model-Analytics by Bennowan. This is an unofficial derivative and is not maintained or endorsed by the original project."
+
+The original repository must be linked:
+
+https://github.com/Bennowan/ComfyUI-Model-Analytics
+
+You may not:
+
+- Claim authorship of the original Project or its original code.
+- Remove or obscure copyright or license notices.
+- Present an unofficial derivative as the official Bennowan project.
+- Use the name or identity of Bennowan in a way that falsely suggests endorsement, authorship, or official status.
+
+Contributors retain copyright in their own original contributions.
+
+## 5. Community Contributions
+
+Contributions to the official Project are welcome.
+
+By submitting a contribution, including through a pull request, the contributor agrees that the submitted contribution is provided under the terms of this license, provided that the contributor has the legal right to do so.
+
+The contributor retains ownership of their original work.
+
+The Project maintainer is not obligated to accept, merge, maintain, or release any contribution.
+
+The maintainer retains control over the official repository, project direction, roadmap, releases, versioning, and official project identity.
+
+## 6. No Transfer of Ownership
+
+This license does not transfer copyright ownership of the Project.
+
+All rights not expressly granted by this license remain with the respective copyright holders.
+
+Nothing in this license gives another person the right to take ownership of the official Project or to represent themselves as its official maintainer.
+
+## 7. Termination
+
+Any violation of the conditions of this license terminates the rights granted to the violating party, to the extent permitted by applicable law.
+
+Upon termination, the violating party must stop exercising the rights granted by this license and stop further use or distribution that relies on those rights, unless the rights have been expressly reinstated by the copyright holder.
+
+Termination does not affect the rights of parties who have complied with this license or rights granted independently by applicable platform terms.
+
+## 8. Disclaimer of Warranty
+
+THE PROJECT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THE PROJECT.
+
+Nothing in this section excludes or limits liability that cannot legally be excluded or limited under applicable law.
+
+## 9. Third-Party Components
+
+This license applies only to material for which the Project's copyright holder has the right to grant these permissions.
+
+Third-party libraries, dependencies, assets, and other externally maintained components remain subject to their own respective licenses and terms.
+
+## 10. Changes to This License
+
+The copyright holder may publish new versions of this license for future releases of material over which the copyright holder has the necessary licensing rights.
+
+A new license version does not automatically change the license terms that applied to copies or releases already distributed under an earlier version.
+
+---
+
+**Bennowan Community Non-Commercial License (BCNCL) v1.0**
+
+Copyright (c) 2026 Bennowan
