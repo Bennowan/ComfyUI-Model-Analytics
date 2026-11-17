@@ -1,18 +1,18 @@
 """
 ComfyUI Model Analytics Dashboard
-Read-only UI extension that shows which models on disk are referenced by
-saved workflows and/or were actually loaded at runtime, and which are
-sitting unused on disk.
-
-No delete functionality is implemented on purpose.
+Local analytics extension for ComfyUI model inventory and custom-node use.
+The dashboard reads model/workflow state and separately records successful
+custom-node execution steps; it does not alter workflows, models or packages.
 """
 
 from .api_server import setup_routes
 from .tracker import install_tracker_hooks
+from .custom_node_analytics import install_execution_hook
 
 # Register API routes and runtime hooks as soon as ComfyUI imports this package.
 setup_routes()
 install_tracker_hooks()
+install_execution_hook()
 
 # Standard ComfyUI custom-node exports. This extension adds no graph nodes,
 # only a server extension + frontend patch, so both maps stay empty.

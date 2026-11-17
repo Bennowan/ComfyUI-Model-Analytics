@@ -1,7 +1,8 @@
 """
 api_server.py
-Registers a single read-only aiohttp endpoint that the frontend polls to
-render the dashboard. No mutation endpoints exist by design.
+Registers local aiohttp endpoints for model/custom-node analytics snapshots.
+The only write endpoint persists the two explicit Custom Node Analytics tracking
+preferences; model and custom-node usage history is never edited by the UI.
 
 Categorization note:
 A model is "Used" if ANY of the following holds, evaluated fresh on
@@ -24,7 +25,13 @@ import logging
 from aiohttp import web
 
 from .scanner import scan_disk_models, scan_workflows, list_workflow_names, get_workflows_dir_debug_info
-from .tracker import get_history, is_recently_used, get_used_threshold_days, latest_timestamp
+from .tracker import (
+    build_usage_analytics,
+    get_history,
+    is_recently_used,
+    get_used_threshold_days,
+    latest_timestamp,
+)
 
 log = logging.getLogger("ModelAnalytics")
 
@@ -286,6 +293,79 @@ async def get_inventory(request: web.Request) -> web.Response:
         return web.json_response(error_payload, status=500)
 
 
+
+async def get_custom_nodes(request: web.Request) -> web.Response:
+    """Return the installed custom-node inventory and separate usage signals."""
+    try:
+        try:
+            from .custom_node_analytics import build_custom_node_inventory
+        except ImportError:
+            from custom_node_analytics import build_custom_node_inventory
+        data = build_custom_node_inventory()
+        revision = data.get("revision", 0)
+        etag = f'"custom-node-analytics-{revision}"'
+        response_headers = {"ETag": etag, "Cache-Control": "no-cache"}
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers=response_headers)
+        return web.json_response(data, headers=response_headers)
+    except Exception as error:
+        log.exception("Failed to build custom-node analytics inventory")
+        return web.json_response({
+            "success": False,
+            "error": f"{type(error).__name__}: {error}",
+            "error_type": type(error).__name__,
+            "hint": "Check the ComfyUI server console/log for the full traceback.",
+        }, status=500)
+
+
+async def update_custom_node_settings(request: web.Request) -> web.Response:
+    """Persist the custom-node tracking switches in the separate node history."""
+    try:
+        try:
+            from .custom_node_analytics import update_settings
+        except ImportError:
+            from custom_node_analytics import update_settings
+        payload = await request.json()
+        settings = update_settings(payload)
+        return web.json_response({"success": True, "settings": settings})
+    except (ValueError, TypeError) as error:
+        return web.json_response({"success": False, "error": str(error)}, status=400)
+    except Exception as error:
+        log.exception("Failed to update custom-node analytics settings")
+        return web.json_response({"success": False, "error": f"{type(error).__name__}: {error}"}, status=500)
+
+
+async def get_usage(request: web.Request) -> web.Response:
+    """Return shared source-aware model and custom-package analytics."""
+    try:
+        period = request.query.get("period", "all")
+        data = build_usage_analytics(period)
+        try:
+            from .custom_node_analytics import build_custom_node_usage_analytics
+        except ImportError:
+            from custom_node_analytics import build_custom_node_usage_analytics
+        try:
+            custom_data = build_custom_node_usage_analytics(period)
+            data.update(custom_data)
+        except Exception:
+            # Keep model analytics available if package-level prompt analytics
+            # encounters a problem. The frontend can display an empty package
+            # result while the server log retains the diagnostic traceback.
+            log.exception("Failed to build custom-node prompt usage analytics")
+            data["custom_packages"] = []
+            data["custom_node_usage_available"] = False
+        else:
+            data["custom_node_usage_available"] = True
+        return web.json_response(data)
+    except Exception as e:
+        log.exception("Failed to build usage analytics")
+        return web.json_response({
+            "success": False,
+            "error": f"{type(e).__name__}: {e}",
+            "error_type": type(e).__name__,
+            "hint": "Check the ComfyUI server console/log for the full traceback.",
+        }, status=500)
+
 def setup_routes() -> None:
     try:
         from server import PromptServer
@@ -299,4 +379,14 @@ def setup_routes() -> None:
     @routes.get("/model_analytics/inventory")
     async def _inventory_route(request: web.Request) -> web.Response:
         return await get_inventory(request)
+    @routes.get("/model_analytics/usage")
+    async def _usage_route(request: web.Request) -> web.Response:
+        return await get_usage(request)
+    @routes.get("/model_analytics/custom_nodes")
+    async def _custom_nodes_route(request: web.Request) -> web.Response:
+        return await get_custom_nodes(request)
+
+    @routes.post("/model_analytics/custom_nodes/settings")
+    async def _custom_node_settings_route(request: web.Request) -> web.Response:
+        return await update_custom_node_settings(request)
 
