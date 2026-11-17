@@ -6,8 +6,8 @@ A local ComfyUI analytics extension for understanding model usage and discoverin
 
 <table>
   <tr>
-    <td><img src="./.docs/used-models.png" alt="Used Models tab" width="480"/></td>
-    <td><img src="./.docs/unused-models.png" alt="Unused Models tab" width="480"/></td>
+    <td><img src="./.docs/used-models-v1.4.4.png" alt="Used Models tab" width="480"/></td>
+    <td><img src="./.docs/unused-models-v1.4.4.png" alt="Unused Models tab" width="480"/></td>
   </tr>
   <tr>
     <td align="center"><sub>Used Models</sub></td>
