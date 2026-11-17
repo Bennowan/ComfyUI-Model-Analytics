@@ -1,8 +1,9 @@
 [project]
 name = "ComfyUI-Model-Analytics"
-description = "Shows which models you actually use vs. which are just wasting disk space. Read-only, no deletion."
-version = "1.4.4"
-license = "MIT"
+description = "Local ComfyUI analytics for model inventory and custom-node usage."
+version = "1.5.0"
+license = "LicenseRef-BCNCL-1.0"
+license-files = ["LICENSE"]
 keywords = [
     "model management",
     "disk space",
@@ -19,6 +20,8 @@ keywords = [
     "multilingual",
     "dashboard-theme",
     "ui-customization",
+    "custom-nodes",
+    "node-usage-analytics",
 ]
 
 # classifiers = [
@@ -46,7 +49,7 @@ Documentation = "https://github.com/Bennowan/ComfyUI-Model-Analytics/wiki"
 
 [tool.comfy]
 PublisherId = "bennowan"
-DisplayName = "ComfyUI-Model-Analytics"
+DisplayName = "ComfyUI Analytics"
 Icon = ""
 includes = []
 # "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
