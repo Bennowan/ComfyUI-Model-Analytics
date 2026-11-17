@@ -25,6 +25,7 @@ for (const language of LANGUAGES) {
   const messages = language.messages;
   const keys = Object.keys(messages).sort();
   assert.deepEqual(keys, baseKeys, `${language.code}: translation keys must match English`);
+  assert.ok(!('tab.usage' in messages), `${language.code}: the standalone Usage tab label must be removed`);
   for (const key of baseKeys) {
     assert.equal(typeof messages[key], 'string', `${language.code}.${key}: value must be a string`);
     assert.ok(messages[key].trim(), `${language.code}.${key}: translation must not be empty`);
@@ -54,6 +55,15 @@ for (const key of [
   'action.open', 'settings.group.recency',
   'settings.recency.enabled.name', 'settings.recency.enabled.tooltip',
   'settings.recency.days.name', 'settings.recency.days.tooltip',
+  'header.source.label', 'header.source.tooltip', 'usage.filter.loading', 'usage.filter.error',
+  'used.summary.source.window', 'used.summary.source.all', 'unused.summary.source.window', 'unused.summary.source.all',
+  'usage.source.all', 'usage.source.frontend', 'usage.source.api', 'usage.source.unknown', 'usage.noModels',
+  'section.models', 'section.customNodes', 'section.settings',
+  'settings.group.models', 'settings.group.modelsNote', 'settings.group.customNodes', 'settings.group.customNodesNote',
+  'settings.defaultSection.name', 'settings.defaultSection.tooltip',
+  'settings.customNodes.tracking.name', 'settings.customNodes.tracking.tooltip',
+  'settings.customNodes.scan.name', 'settings.customNodes.scan.tooltip',
+  'settings.customNodes.storageNote', 'settings.customNodes.syncError',
 ]) {
   assert.ok(key in base, `dynamic translation key must exist: ${key}`);
 }
@@ -86,14 +96,27 @@ assert.ok(marked.includes('<b>4</b>'));
 assert.ok(marked.includes('<code>.disabled</code>'));
 assert.ok(!marked.includes('<img'));
 
-assert.ok(mainSource.includes('const DATA_TABS = ["used", "unused", "disabled", "workflow"]'), 'settings tab must not become a data default tab');
-assert.ok(mainSource.includes('this.activeTab === "settings"'), 'dashboard must render its in-dashboard settings tab');
+assert.ok(mainSource.includes('const EXT_VERSION = "156"'), 'frontend asset cache version must be bumped for the Analytics dashboard');
+assert.ok(mainSource.includes('const DATA_TABS = ["used", "unused", "disabled", "workflow"]'), 'Usage must not become a separate dashboard tab');
+assert.ok(mainSource.includes('fetch(`/model_analytics/usage?period='), 'source filter must fetch source-aware model usage');
+assert.ok(mainSource.includes('.ma-source-filter-select'), 'usage source must be selected from the dashboard header');
+assert.ok(mainSource.includes('findUsedInventoryModels') && mainSource.includes('findUnusedInventoryModels'), 'source filter must apply to existing Used and Unused tabs');
+assert.ok(mainSource.includes('findUsedCustomNodePackages') && mainSource.includes('findUnusedCustomNodePackages'), 'global source and recency filters must apply to package-level Custom Node tabs');
+assert.ok(!mainSource.includes('renderUsageTab') && !mainSource.includes('this.activeTab === "usage"'), 'standalone Usage tab UI must be removed');
+assert.ok(mainSource.includes('this.activeSection === "settings"'), 'dashboard must render its in-dashboard Settings section');
+assert.ok(mainSource.includes('const TABS = ["models", "customNodes", "settings"]'), 'dashboard must expose Models, Custom Nodes and Settings as primary sections');
+assert.ok(mainSource.includes('renderCustomNodeTabs') && mainSource.includes('this.renderDataTable("customUsed"'), 'Custom Node Analytics must use the shared package table renderer');
+assert.ok(mainSource.includes('sharedUsageControls.hidden = !["models", "customNodes"].includes(this.activeSection)'), 'shared usage controls must be visible in both analytics sections');
+assert.ok(mainSource.includes('await this.refreshSourceUsage({ render: false });') && mainSource.includes('this.activeSection === "customNodes"'), 'the global recency window must refresh package usage while Custom Nodes is active');
+assert.ok(mainSource.includes('usageData: this.sourceUsageData') && mainSource.includes('source: this.usageSourceFilter'), 'Custom Node tab counts must use shared source and time-window filters');
 assert.ok(mainSource.includes('this.attachSettingsHandlers(body)'), 'settings controls must use a persistent delegated handler');
 assert.ok(mainSource.includes('ModelAnalytics.Appearance'), 'dashboard appearance preference must be persisted');
 const css = fs.readFileSync(path.join(projectRoot, 'web/css/style.css'), 'utf8');
 assert.ok(css.includes('.ma-theme-grid'), 'ComfyUI palette choices must have a dedicated picker');
 assert.ok(css.includes('--ma-custom-bg'), 'custom appearance must be scoped to the dashboard');
 assert.ok(css.includes('.ma-settings-page'), 'settings tab must have dedicated styling');
+assert.ok(css.includes('.ma-source-filter-select'), 'inline source filter must have dedicated styling');
+assert.ok(!css.includes('.ma-usage-content'), 'standalone Usage dashboard styling must be removed');
 assert.ok(css.includes('.ma-body.ma-body-settings') && css.includes('width: 100%') && css.includes('height: 100%'), 'settings page and its scrollbar must occupy the full modal content width and height');
 assert.ok(mainSource.includes('cache: "no-store"'), 'inventory refresh must bypass browser caching');
 assert.ok(mainSource.includes('"execution_start", "execution_success"'), 'inventory must refresh when execution starts and finishes');
@@ -105,6 +128,7 @@ assert.ok(mainSource.includes('ma-menu-btn-icon'), 'legacy Model Analytics menu 
 // Exactly one visible Model Analytics entry is registered per ComfyUI menu
 // mode. The legacy menu uses the styled button; modern mode uses action bar.
 assert.ok(mainSource.includes('optionsHtml(options, value)'), 'appearance select renderer must exist on the dashboard');
+assert.ok(mainSource.includes('renderSettingSelect(id, titleKey, tooltipKey, value)'), 'settings select renderer must exist on the dashboard');
 assert.ok(mainSource.includes('if (!legacyMenuInUse())'), 'modern action bar entry must be gated to modern menu mode');
 assert.ok(mainSource.includes('if (legacyMenuInUse()) addLegacyMenuButton();'), 'legacy button must be gated to legacy menu mode');
 assert.ok(mainSource.includes('actionBarButtons,'), 'modern action bar button must be registered');
@@ -121,12 +145,15 @@ assert.ok(!/localStorage\.setItem/.test(mainSource), 'main.js must not write to 
 // Language: a manual choice is only ever written by the user's own action.
 assert.ok(!/writeSetting\(\s*SETTING\.language/.test(mainSource), 'the language setting must never be written automatically');
 
-// Read-only by design: no delete/remove functionality anywhere in the frontend.
+// Analytics data is read-only; the sole write request synchronizes two custom-node tracking preferences.
 const sourcesToScan = [mainSource, fs.readFileSync(path.join(projectRoot, 'web/js/i18n/index.js'), 'utf8')];
 for (const source of sourcesToScan) {
-  assert.ok(!/method:\s*['"](DELETE|POST|PUT|PATCH)['"]/i.test(source), 'frontend must only issue read requests');
+  assert.ok(!/method:\s*['"](DELETE|PUT|PATCH)['"]/i.test(source), 'frontend must not expose destructive or general write requests');
   assert.ok(!/\bunlink\b|\brmtree\b|\bremoveFile\b|deleteModel/i.test(source), 'no delete functionality allowed');
 }
+const frontendWriteMethods = [...mainSource.matchAll(/method:\s*['"]([A-Z]+)['"]/gi)].map((match) => match[1].toUpperCase());
+assert.deepEqual(frontendWriteMethods, ['POST'], 'only the custom-node settings synchronization may use POST');
+assert.ok(mainSource.includes('/model_analytics/custom_nodes/settings'), 'custom-node preferences must sync to their dedicated settings endpoint');
 for (const [code, messages] of LANGUAGES.map((l) => [l.code, l.messages])) {
   for (const [key, value] of Object.entries(messages)) {
     assert.ok(!/\b(delete|trash)\b|löschen|删除|刪除|削除|삭제/i.test(value), `${code}.${key}: no delete wording in the UI text`);
@@ -135,7 +162,7 @@ for (const [code, messages] of LANGUAGES.map((l) => [l.code, l.messages])) {
 
 // Python side: no environment variable access, no deletion, no network or
 // process access (keeps the scanner-compatibility fixes intact).
-for (const file of ['__init__.py', 'api_server.py', 'scanner.py', 'tracker.py']) {
+for (const file of ['__init__.py', 'api_server.py', 'scanner.py', 'tracker.py', 'custom_node_analytics.py']) {
   const py = fs.readFileSync(path.join(projectRoot, file), 'utf8');
   assert.ok(!/os\.environ|getenv|environ\[/.test(py), `${file}: must not read environment variables`);
   assert.ok(!/subprocess|os\.system|shutil\.rmtree|os\.remove|os\.unlink|\.unlink\(|rmdir|eval\(|exec\(/.test(py), `${file}: no process or delete calls allowed`);
@@ -148,3 +175,10 @@ assert.ok(css.includes('CanvasText') && css.includes('AccentColor'), 'explicit t
 assert.ok(!css.includes('--primary-foreground') && !css.includes('var(--success'), 'tokens that ComfyUI does not define must not be referenced');
 
 console.log(`i18n and dashboard checks passed: ${LANGUAGES.length} locales, ${baseKeys.length} keys each, locale mapping, escaping, settings, layout, inventory refresh and appearance wiring verified.`);
+
+
+assert.ok(!mainSource.includes("customUiOnly"), 'the secondary UI-only package table must be removed');
+assert.ok(!mainSource.includes("custom.uiOnly."), 'the UI-only explanatory block must be removed');
+assert.ok(!css.includes('table.ma-table th:last-child .ma-col-resizer'), 'the final header must not create a duplicate resize handle on its left edge');
+assert.match(mainSource, /getResizableColumnIds\(ordered\.map\(\(column\) => column\.id\)\)/, 'resize handles must be generated from displayed column order');
+assert.match(mainSource, /hasResizeHandle \? `<span class=\"ma-col-resizer\"/, 'the final displayed column must omit its resize handle');

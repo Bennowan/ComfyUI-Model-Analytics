@@ -22,10 +22,19 @@ import {
   serializeCustomAppearance,
 } from "./appearance.js";
 import { calculateInventoryStats } from "./inventory-stats.js";
+import { renderCustomNodeTabs } from "./custom-node-analytics.js";
+import {
+  findUsedInventoryModels,
+  findUnusedInventoryModels,
+  findUsedCustomNodePackages,
+  findUnusedCustomNodePackages,
+  USAGE_SOURCES,
+} from "./usage-analytics.js";
 import {
   normalizeTableLayout,
   reorderTableColumn,
   resizeAdjacentColumns,
+  getResizableColumnIds,
 } from "./table-layout.js";
 
 // Bump this whenever main.js/style.css change, so the injected <link> tag
@@ -33,7 +42,7 @@ import {
 // (main.js itself is loaded by ComfyUI's own extension loader - if you
 // don't see JS changes after an update, hard-refresh the browser tab,
 // e.g. Ctrl+Shift+R / Cmd+Shift+R, or disable cache in devtools.)
-const EXT_VERSION = "144";
+const EXT_VERSION = "156";
 
 const GITHUB_REPO_URL = "https://github.com/Bennowan/ComfyUI-Model-Analytics";
 
@@ -67,6 +76,10 @@ const SETTING = {
   tableLayout: "ModelAnalytics.TableLayout",
   recencyEnabled: "ModelAnalytics.RecencyEnabled",
   recencyDays: "ModelAnalytics.RecencyDays",
+  usageSource: "ModelAnalytics.UsageSource",
+  defaultSection: "ModelAnalytics.DefaultSection",
+  customNodeTrackingEnabled: "ModelAnalytics.CustomNodes.TrackingEnabled",
+  customNodeScanWorkflows: "ModelAnalytics.CustomNodes.ScanWorkflows",
 };
 const COMFY_LOCALE_SETTING = "Comfy.Locale";
 // "Disabled" means ComfyUI shows its legacy floating menu instead of the
@@ -75,7 +88,8 @@ const COMFY_MENU_SETTING = "Comfy.UseNewMenu";
 
 const LANGUAGE_AUTO = "auto";
 const DATA_TABS = ["used", "unused", "disabled", "workflow"];
-const TABS = [...DATA_TABS, "settings"];
+const TABS = ["models", "customNodes", "settings"];
+
 const SIZE_UNITS = ["binary", "decimal"];
 const DENSITIES = ["normal", "compact"];
 const DATE_FORMATS = ["system", "iso"];
@@ -238,6 +252,9 @@ function currentSettings() {
     density: readChoice(SETTING.density, DENSITIES, "normal"),
     dateFormat: readChoice(SETTING.dateFormat, DATE_FORMATS, "system"),
     defaultTab: readChoice(SETTING.defaultTab, DATA_TABS, "used"),
+    defaultSection: readChoice(SETTING.defaultSection, ["models", "customNodes"], "models"),
+    customNodeTrackingEnabled: readSetting(SETTING.customNodeTrackingEnabled, true) !== false,
+    customNodeScanWorkflows: readSetting(SETTING.customNodeScanWorkflows, true) !== false,
     // The banner is visible by default. Only an explicit X dismissal hides it;
     // old versions of the visible on/off toggle are deliberately ignored.
     starBanner: readSetting(SETTING.starBannerDismissed, false) !== true,
@@ -303,8 +320,26 @@ function formatDate(iso, format) {
 class ModelAnalyticsDashboard {
   constructor() {
     this.data = null;
+    this.activeSection = "models";
     this.activeTab = "used";
-    this.sortState = { used: { col: "last_activity", dir: -1 }, unused: { col: "size_bytes", dir: -1 }, disabled: { col: "size_bytes", dir: -1 } };
+    this.activeCustomNodeTab = "used";
+    // Keep the last package snapshot across modal opens. The backend checks
+    // file/registry fingerprints and rebuilds only when an input changed.
+    this.customNodeData = null;
+    this.customNodeError = null;
+    this.customNodeRequestId = 0;
+    this.customNodeETag = null;
+    this.lastCustomNodeSettingsSyncKey = null;
+    this.customNodeSettingsSyncPromise = null;
+    this.sortState = {
+      used: { col: "last_activity", dir: -1 },
+      unused: { col: "size_bytes", dir: -1 },
+      disabled: { col: "size_bytes", dir: -1 },
+      customUsed: { col: "execution_count", dir: -1 },
+      customUnused: { col: "name", dir: 1 },
+      customDisabled: { col: "name", dir: 1 },
+      customWorkflow: { col: "name", dir: 1 },
+    };
     this.selectedWorkflow = null;
     this.overlay = null;
     this.usedThresholdDays = DEFAULT_RECENCY_DAYS;
@@ -313,6 +348,12 @@ class ModelAnalyticsDashboard {
     this.openAppearancePanel = null;
     this.executionRefreshTimer = null;
     this.tableLayoutCache = {};
+    this.usageSourceFilter = readChoice(SETTING.usageSource, ["all", ...USAGE_SOURCES], "all");
+    this.sourceUsageData = null;
+    this.sourceUsageLoading = false;
+    this.sourceUsageError = null;
+    this.sourceUsageRequestId = 0;
+    this.modelInventoryPeriod = null;
     // Whether the "Used within last N days" window applies at all. When
     // off, any past load (or a workflow reference) counts as used.
     // Both values live in the ComfyUI settings (see loadSettings()).
@@ -332,6 +373,7 @@ class ModelAnalyticsDashboard {
     const recency = readRecency();
     this.usedThresholdEnabled = recency.enabled;
     this.usedThresholdDays = recency.days;
+    this.usageSourceFilter = readChoice(SETTING.usageSource, ["all", ...USAGE_SOURCES], "all");
   }
 
   t(key, params) {
@@ -347,15 +389,33 @@ class ModelAnalyticsDashboard {
     if (this.overlay) this.close();
     this.loadSettings();
     this.resolvePaletteSnapshot();
+    this.activeSection = this.settings.defaultSection;
     this.activeTab = this.settings.defaultTab;
+    this.activeCustomNodeTab = "used";
+    this.sourceUsageData = null;
+    this.sourceUsageError = null;
+    this.sourceUsageRequestId += 1;
+    this.customNodeRequestId += 1;
+    await this.syncCustomNodeSettings();
     this.buildModal();
-    await this.refresh();
+    if (this.data || this.customNodeData) this.render();
+    if (this.activeSection === "customNodes") {
+      await Promise.all([
+        this.refreshCustomNodes({ quiet: Boolean(this.customNodeData) }),
+        this.refreshSourceUsage({ render: false }),
+      ]);
+      this.render();
+    } else await this.refresh();
   }
 
   close() {
     if (this.overlay) {
       this.overlay.remove();
       this.overlay = null;
+    }
+    if (this.executionRefreshTimer) {
+      clearTimeout(this.executionRefreshTimer);
+      this.executionRefreshTimer = null;
     }
   }
 
@@ -365,11 +425,22 @@ class ModelAnalyticsDashboard {
     const recency = { enabled: this.usedThresholdEnabled, days: this.usedThresholdDays };
     const previous = this.settings;
     const previousLanguage = this.tr.code;
+    const previousUsageSource = this.usageSourceFilter;
+    const previousCustomTracking = previous.customNodeTrackingEnabled;
+    const previousWorkflowScan = previous.customNodeScanWorkflows;
     this.loadSettings();
+    const usageSourceChanged = previousUsageSource !== this.usageSourceFilter;
+    const customNodeSettingsChanged = previousCustomTracking !== this.settings.customNodeTrackingEnabled
+      || previousWorkflowScan !== this.settings.customNodeScanWorkflows;
     this.resolvePaletteSnapshot();
     this.usedThresholdEnabled = recency.enabled;
     this.usedThresholdDays = recency.days;
-    if (!this.overlay) return;
+    if (!this.overlay) {
+      // ComfyUI settings can be changed outside the dashboard. Synchronize
+      // tracking switches even while the dashboard itself is closed.
+      if (customNodeSettingsChanged) void this.syncCustomNodeSettings();
+      return;
+    }
 
     if (this.tr.code !== previousLanguage || this.settings.starBanner !== previous.starBanner) {
       this.close();
@@ -381,6 +452,20 @@ class ModelAnalyticsDashboard {
     this.applyLiveSettings();
     const changed = ["appearancePreference", "paletteId", "sizeUnit", "dateFormat", "density"].some((key) => previous[key] !== this.settings[key]);
     if (changed) this.render();
+    if (usageSourceChanged && this.overlay) {
+      const sourceSelect = this.overlay.querySelector(".ma-source-filter-select");
+      if (sourceSelect) sourceSelect.value = this.usageSourceFilter;
+      this.sourceUsageData = null;
+      this.refreshSourceUsage();
+    }
+    if (customNodeSettingsChanged) {
+      this.customNodeData = null;
+      this.customNodeETag = null;
+      void this.syncCustomNodeSettings().then(() => {
+        if (this.activeSection === "customNodes") return this.refreshCustomNodes();
+        return null;
+      });
+    }
   }
 
   applyLiveSettings() {
@@ -394,7 +479,15 @@ class ModelAnalyticsDashboard {
     if (this.executionRefreshTimer) clearTimeout(this.executionRefreshTimer);
     this.executionRefreshTimer = setTimeout(() => {
       this.executionRefreshTimer = null;
-      if (this.overlay) this.refresh({ quiet: this.activeTab === "settings" });
+      if (this.overlay) {
+        if (this.activeSection === "customNodes") {
+          Promise.all([
+            this.refreshCustomNodes({ quiet: true }),
+            this.refreshSourceUsage({ render: false }),
+          ]).then(() => this.render());
+        }
+        else if (this.activeSection === "models") this.refresh({ quiet: true });
+      }
     }, 450);
   }
 
@@ -417,11 +510,21 @@ class ModelAnalyticsDashboard {
     const settingsRoot = this.overlay.querySelector(".ma-body");
     const settingsDays = settingsRoot?.querySelector(`[data-setting="${SETTING.recencyDays}"]`);
     if (settingsDays) settingsDays.disabled = !enabled;
-    if (this.activeTab !== "settings") {
+    this.modelInventoryPeriod = null;
+    if (this.activeSection === "models") {
       const body = this.overlay.querySelector(".ma-body");
       body.innerHTML = `<div class="ma-summary">${this.h("common.loading")}</div>`;
+      await this.refresh();
+    } else {
+      // The same recency selector drives package prompt-presence analytics.
+      // Do not reload the model inventory while Custom Nodes is active.
+      const body = this.overlay.querySelector(".ma-body");
+      if (this.activeSection === "customNodes") {
+        body.innerHTML = `<div class="ma-summary">${this.h("common.loading")}</div>`;
+      }
+      await this.refreshSourceUsage({ render: false });
+      if (this.activeSection === "customNodes") this.render();
     }
-    await this.refresh();
   }
 
   // Called when a recency setting changed outside the dashboard.
@@ -439,17 +542,29 @@ class ModelAnalyticsDashboard {
 
     const showBanner = this.settings.starBanner;
     const densityClass = this.settings.density === "compact" ? " ma-density-compact" : "";
+    const sourceOptions = [
+      { value: "all", label: this.t("usage.source.all") },
+      ...USAGE_SOURCES.map((source) => ({ value: source, label: this.t(`usage.source.${source}`) })),
+    ];
     overlay.innerHTML = `
       <div class="ma-modal${densityClass}${showBanner ? " ma-modal--banner" : ""}" role="dialog" aria-modal="true" aria-label="${this.h("app.title")}">
         <div class="ma-header">
           <h2 class="ma-title"><i class="pi pi-chart-bar" aria-hidden="true"></i>${this.h("app.title")}</h2>
           <div class="ma-header-right">
-            <label class="ma-stale-control" title="${this.h("header.recency.tooltip")}">
-              <input type="checkbox" class="ma-stale-toggle" ${this.usedThresholdEnabled ? "checked" : ""} />
-              ${this.h("header.recency.before")}
-              <input type="number" class="ma-stale-input" min="1" step="1" value="${escapeHtml(this.usedThresholdDays)}" ${this.usedThresholdEnabled ? "" : "disabled"} />
-              ${this.h("header.recency.after")}
-            </label>
+            <div class="ma-shared-usage-controls">
+              <label class="ma-stale-control" title="${this.h("header.recency.tooltip")}">
+                <input type="checkbox" class="ma-stale-toggle" ${this.usedThresholdEnabled ? "checked" : ""} />
+                ${this.h("header.recency.before")}
+                <input type="number" class="ma-stale-input" min="1" step="1" value="${escapeHtml(this.usedThresholdDays)}" ${this.usedThresholdEnabled ? "" : "disabled"} />
+                ${this.h("header.recency.after")}
+              </label>
+              <label class="ma-source-control" title="${this.h("header.source.tooltip")}">
+                <span>${this.h("header.source.label")}</span>
+                <select class="ma-source-filter-select" aria-label="${this.h("header.source.label")}">
+                  ${sourceOptions.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === this.usageSourceFilter ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+                </select>
+              </label>
+            </div>
             <a class="ma-btn ma-btn-accent ma-star-btn ma-star-header" href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer" title="${this.h("star.tooltip")}">${this.h("star.button")}</a>
             <button type="button" class="ma-btn ma-btn-ghost ma-btn-icon ma-close-btn" title="${this.h("common.close")}" aria-label="${this.h("common.close")}">✕</button>
           </div>
@@ -462,7 +577,7 @@ class ModelAnalyticsDashboard {
         </div>
         ` : ""}
         <div class="ma-tabs" role="tablist">
-          ${TABS.map((tab) => `<button type="button" role="tab" class="ma-tab-btn" data-tab="${tab}">${this.h(`tab.${tab}`)}<span class="ma-tab-count" hidden></span></button>`).join("")}
+          ${TABS.map((section) => `<button type="button" role="tab" class="ma-tab-btn" data-section="${section}">${this.h(`section.${section}`)}<span class="ma-tab-count" hidden></span></button>`).join("")}
         </div>
         <div class="ma-body">
           <div class="ma-summary">${this.h("common.loading")}</div>
@@ -484,8 +599,13 @@ class ModelAnalyticsDashboard {
     overlay.querySelector(".ma-close-btn").addEventListener("click", () => this.close());
     overlay.querySelectorAll(".ma-tab-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
-        this.activeTab = btn.dataset.tab;
+        const section = btn.dataset.section;
+        if (!TABS.includes(section) || section === this.activeSection) return;
+        this.activeSection = section;
         this.render();
+        const requestedPeriod = this.usedThresholdEnabled ? `${this.usedThresholdDays}d` : "all";
+        if (section === "models" && (!this.data || this.modelInventoryPeriod !== requestedPeriod)) this.refresh();
+        if (section === "customNodes") this.refreshCustomNodes({ quiet: Boolean(this.customNodeData) });
       });
     });
     const body = overlay.querySelector(".ma-body");
@@ -512,6 +632,19 @@ class ModelAnalyticsDashboard {
       await this.applyRecency(enabled, this.usedThresholdDays);
     });
 
+    const sourceSelect = overlay.querySelector(".ma-source-filter-select");
+    sourceSelect.addEventListener("change", async () => {
+      const nextSource = sourceSelect.value;
+      if (!["all", ...USAGE_SOURCES].includes(nextSource) || nextSource === this.usageSourceFilter) return;
+      this.usageSourceFilter = nextSource;
+      this.sourceUsageData = null;
+      this.sourceUsageError = null;
+      await writeSetting(SETTING.usageSource, nextSource);
+      this.sourceUsageLoading = true;
+      this.render();
+      await this.refreshSourceUsage();
+    });
+
     document.body.appendChild(overlay);
     this.overlay = overlay;
     applyAppearance(overlay, this.settings.appearance, this.custom, this.paletteSnapshot);
@@ -523,6 +656,8 @@ class ModelAnalyticsDashboard {
       const res = await fetch(`/model_analytics/inventory?used_threshold_days=${encodeURIComponent(thresholdParam)}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this.data = await res.json();
+      this.modelInventoryPeriod = thresholdParam === "off" ? "all" : `${thresholdParam}d`;
+      await this.refreshSourceUsage({ render: false });
     } catch (e) {
       const body = this.overlay?.querySelector(".ma-body");
       if (body && !quiet) {
@@ -530,106 +665,347 @@ class ModelAnalyticsDashboard {
       }
       return;
     }
-    this.render({ preserveSettings: quiet && this.activeTab === "settings" });
+    this.render({ preserveSettings: quiet && this.activeSection === "settings" });
+  }
+
+  async syncCustomNodeSettings() {
+    const readPayload = () => ({
+      tracking_enabled: this.settings?.customNodeTrackingEnabled !== false,
+      scan_workflows: this.settings?.customNodeScanWorkflows !== false,
+    });
+    let payload = readPayload();
+    let syncKey = JSON.stringify(payload);
+    if (this.lastCustomNodeSettingsSyncKey === syncKey) return true;
+
+    // Coalesce calls from the dashboard control and ComfyUI's onChange hook.
+    // If the setting changes while a request is in flight, send only the
+    // latest value after the current request has completed.
+    if (this.customNodeSettingsSyncPromise) {
+      await this.customNodeSettingsSyncPromise;
+      payload = readPayload();
+      syncKey = JSON.stringify(payload);
+      if (this.lastCustomNodeSettingsSyncKey === syncKey) return true;
+    }
+
+    const request = (async () => {
+      try {
+        const response = await fetch("/model_analytics/custom_nodes/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        if (result?.success !== true) throw new Error(result?.error || "Invalid settings response");
+        this.lastCustomNodeSettingsSyncKey = syncKey;
+        return true;
+      } catch (error) {
+        console.warn("Custom Node Analytics settings could not be synchronized:", error);
+        return false;
+      }
+    })();
+    this.customNodeSettingsSyncPromise = request;
+    try {
+      return await request;
+    } finally {
+      if (this.customNodeSettingsSyncPromise === request) this.customNodeSettingsSyncPromise = null;
+    }
+  }
+
+  async refreshCustomNodes({ quiet = false } = {}) {
+    const requestId = ++this.customNodeRequestId;
+    try {
+      const headers = this.customNodeETag ? { "If-None-Match": this.customNodeETag } : {};
+      const response = await fetch("/model_analytics/custom_nodes", { cache: "no-store", headers });
+      if (response.status === 304) {
+        if (!this.customNodeData) throw new Error("Server reported an unchanged snapshot before the first data load");
+        this.customNodeError = null;
+        return;
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      if (requestId !== this.customNodeRequestId) return;
+      if (!payload || payload.success !== true || !Array.isArray(payload.packages) || !Array.isArray(payload.workflows)) {
+        throw new Error(payload?.error || "Invalid package-level custom-node inventory response");
+      }
+      this.customNodeData = payload;
+      this.customNodeETag = response.headers.get("ETag") || null;
+      this.customNodeError = null;
+    } catch (error) {
+      if (requestId === this.customNodeRequestId) {
+        this.customNodeError = error?.message || String(error);
+        // Retain the last known-good snapshot on transient API failures. A
+        // cached view is more useful than replacing it with a loading/error
+        // page every time the dashboard is reopened.
+        if (!quiet && !this.customNodeData) this.customNodeData = null;
+      }
+    }
+    if (this.overlay && this.activeSection === "customNodes") this.render();
+  }
+
+  async refreshSourceUsage({ render = true } = {}) {
+    const requestId = ++this.sourceUsageRequestId;
+    const period = this.usedThresholdEnabled ? `${this.usedThresholdDays}d` : "all";
+    this.sourceUsageLoading = true;
+    this.sourceUsageError = null;
+    try {
+      const response = await fetch(`/model_analytics/usage?period=${encodeURIComponent(period)}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (requestId !== this.sourceUsageRequestId) return;
+      if (!data || data.success !== true || !Array.isArray(data.models) || !Array.isArray(data.custom_packages)) {
+        throw new Error(data?.error || "Invalid usage response");
+      }
+      this.sourceUsageData = data;
+    } catch (error) {
+      if (requestId === this.sourceUsageRequestId) {
+        this.sourceUsageData = null;
+        this.sourceUsageError = error?.message || String(error);
+      }
+    } finally {
+      if (requestId === this.sourceUsageRequestId) this.sourceUsageLoading = false;
+    }
+    if (render && this.overlay) this.render();
+  }
+
+  sourceFilteredInventory() {
+    if (this.usageSourceFilter === "all" || !this.sourceUsageData) return null;
+    const models = this.data?.models || [];
+    return {
+      used: findUsedInventoryModels(models, this.sourceUsageData.models, this.usageSourceFilter),
+      unused: findUnusedInventoryModels(models, this.sourceUsageData.models, this.usageSourceFilter),
+    };
   }
 
   tabCounts() {
     if (!this.data) return {};
     const stats = calculateInventoryStats(this.data.models || []);
+    const filtered = this.sourceFilteredInventory();
     return {
-      used: stats.used.length,
-      unused: stats.unused.length,
+      used: this.usageSourceFilter === "all" ? stats.used.length : (filtered?.used.length),
+      unused: this.usageSourceFilter === "all" ? stats.unused.length : (filtered?.unused.length),
       disabled: stats.disabled.length,
       workflow: (this.data.workflow_names || []).length,
     };
   }
 
+  sectionCounts() {
+    return {
+      models: this.data ? Number(this.data.total_models || 0) : undefined,
+      customNodes: this.customNodeData ? Number(this.customNodeData.summary?.package_count || 0) : undefined,
+    };
+  }
+
   render({ preserveSettings = false } = {}) {
     if (!this.overlay) return;
-    const counts = this.tabCounts();
+    const modelCounts = this.tabCounts();
+    const sectionCounts = this.sectionCounts();
     this.overlay.querySelectorAll(".ma-tab-btn").forEach((btn) => {
-      const active = btn.dataset.tab === this.activeTab;
+      const active = btn.dataset.section === this.activeSection;
       btn.classList.toggle("active", active);
       btn.setAttribute("aria-selected", active ? "true" : "false");
       const badge = btn.querySelector(".ma-tab-count");
-      const count = counts[btn.dataset.tab];
+      const count = sectionCounts[btn.dataset.section];
       if (badge) {
         badge.hidden = count === undefined;
         if (count !== undefined) badge.textContent = String(count);
       }
     });
 
+    const sharedUsageControls = this.overlay.querySelector(".ma-shared-usage-controls");
+    if (sharedUsageControls) {
+      sharedUsageControls.hidden = !["models", "customNodes"].includes(this.activeSection);
+    }
+
     const body = this.overlay.querySelector(".ma-body");
-    if (preserveSettings && this.activeTab === "settings") return;
-    if (this.activeTab === "settings") {
+    if (preserveSettings && this.activeSection === "settings") return;
+    if (this.activeSection === "settings") {
       body.classList.add("ma-body-settings");
       body.innerHTML = this.renderSettingsTab();
       return;
     }
     body.classList.remove("ma-body-settings");
-    if (!this.data) {
-      body.innerHTML = `<div class="ma-empty-state">${this.h("common.noData")}</div>`;
+
+    if (this.activeSection === "models") {
+      const tabs = DATA_TABS.map((tab) => {
+        const count = modelCounts[tab];
+        return `<button type="button" role="tab" class="ma-subtab-btn${tab === this.activeTab ? " active" : ""}" data-model-tab="${tab}" aria-selected="${tab === this.activeTab ? "true" : "false"}">${this.h(`tab.${tab}`)}${count === undefined ? "" : `<span class="ma-tab-count">${escapeHtml(count)}</span>`}</button>`;
+      }).join("");
+      let content = `<div class="ma-empty-state">${this.h("common.noData")}</div>`;
+      if (this.data) {
+        if (this.activeTab === "used") content = this.renderUsedTab();
+        else if (this.activeTab === "unused") content = this.renderUnusedTab();
+        else if (this.activeTab === "disabled") content = this.renderDisabledTab();
+        else content = this.renderWorkflowTab();
+      }
+      body.innerHTML = `<div class="ma-subtabs" role="tablist">${tabs}</div><div class="ma-section-content">${content}</div>`;
+      body.querySelectorAll(".ma-subtab-btn[data-model-tab]").forEach((button) => {
+        button.addEventListener("click", () => {
+          this.activeTab = button.dataset.modelTab;
+          this.render();
+        });
+      });
+      this.attachSortHandlers(body);
+      this.attachWorkflowSelectHandler(body);
       return;
     }
 
-    if (this.activeTab === "used") {
-      body.innerHTML = this.renderUsedTab();
-    } else if (this.activeTab === "unused") {
-      body.innerHTML = this.renderUnusedTab();
-    } else if (this.activeTab === "disabled") {
-      body.innerHTML = this.renderDisabledTab();
-    } else {
-      body.innerHTML = this.renderWorkflowTab();
+    if (this.activeSection === "customNodes") {
+      body.innerHTML = this.renderCustomNodeSection();
+      body.querySelectorAll(".ma-subtab-btn[data-custom-node-tab]").forEach((button) => {
+        button.addEventListener("click", () => {
+          this.activeCustomNodeTab = button.dataset.customNodeTab;
+          this.render();
+        });
+      });
+      this.attachSortHandlers(body);
+      return;
+    }
+  }
+
+  renderCustomNodeSection() {
+    const tabs = renderCustomNodeTabs({
+      data: this.customNodeData,
+      usageData: this.sourceUsageData,
+      source: this.usageSourceFilter,
+      activeTab: this.activeCustomNodeTab,
+      h: (key, params) => this.h(key, params),
+    });
+    if (this.customNodeError && !this.customNodeData) {
+      return `${tabs}<div class="ma-section-content"><div class="ma-empty-state">${this.h("common.loadError", { message: this.customNodeError })}</div></div>`;
+    }
+    if (!this.customNodeData) {
+      return `${tabs}<div class="ma-section-content"><div class="ma-summary">${this.h("common.loading")}</div></div>`;
+    }
+    if (this.customNodeData.success !== true) {
+      return `${tabs}<div class="ma-section-content"><div class="ma-empty-state">${this.h("common.loadError", { message: this.customNodeData.error || "Unknown error" })}</div></div>`;
     }
 
-    this.attachSortHandlers(body);
-    this.attachWorkflowSelectHandler(body);
+    const data = this.customNodeData;
+    const packages = Array.isArray(data.packages) ? data.packages : [];
+    const workflows = Array.isArray(data.workflows) ? data.workflows : [];
+    const trackingEnabled = data.settings?.tracking_enabled !== false;
+    const scanEnabled = data.settings?.scan_workflows !== false;
+    if (["used", "unused"].includes(this.activeCustomNodeTab)) {
+      if (this.sourceUsageData?.custom_node_usage_available === false) {
+        return `${tabs}<div class="ma-section-content"><div class="ma-empty-state ma-source-filter-error">${this.h("usage.filter.error", { message: "Custom Node usage analytics are currently unavailable." })}</div></div>`;
+      }
+      if (this.sourceUsageLoading && !this.sourceUsageData) {
+        return `${tabs}<div class="ma-section-content"><div class="ma-empty-state"><i class="pi pi-spin pi-spinner" aria-hidden="true"></i> ${this.h("usage.filter.loading")}</div></div>`;
+      }
+      if (this.sourceUsageError && !this.sourceUsageData) {
+        return `${tabs}<div class="ma-section-content"><div class="ma-empty-state ma-source-filter-error">${this.h("usage.filter.error", { message: this.sourceUsageError })}</div></div>`;
+      }
+    }
+    const packageUsage = this.sourceUsageData?.custom_packages || [];
+    const source = this.usageSourceFilter;
+    const period = this.sourceUsageData?.period || (this.usedThresholdEnabled ? `${this.usedThresholdDays}d` : "all");
+    const usedPackages = findUsedCustomNodePackages(packages, packageUsage, source, period);
+    const unusedPackages = findUnusedCustomNodePackages(packages, packageUsage, source, period);
+    const packageUsageById = new Map(packageUsage.map((item) => [item.package_id, item]));
+    const selectedPromptCount = (items) => items.reduce((total, item) => {
+      const stats = packageUsageById.get(item.id);
+      if (!stats) return total;
+      if (source === "all") return total + Number(stats.prompt_count || 0);
+      return total + Number(stats.source_counts?.[source] || 0);
+    }, 0);
+    let content = "";
+
+    if (this.activeCustomNodeTab === "used") {
+      const rows = usedPackages;
+      const sorted = this.sortRows(rows, this.sortState.customUsed.col, this.sortState.customUsed.dir);
+      const variant = this.usedThresholdEnabled ? "window" : "all";
+      const params = {
+        count: bold(sorted.length),
+        executions: bold(sorted.reduce((sum, item) => sum + Number(item.execution_count || 0), 0)),
+        prompts: bold(selectedPromptCount(sorted)),
+        days: this.usedThresholdDays,
+        source: this.t(`usage.source.${source}`),
+      };
+      const summaryKey = source === "all" ? `custom.used.summary.${variant}` : `custom.used.summary.source.${variant}`;
+      content = sorted.length
+        ? `<div class="ma-summary">${this.h(summaryKey, params)}${!trackingEnabled ? ` · ${this.h("custom.status.trackingPaused")}` : ""}</div>${this.renderDataTable("customUsed", sorted)}`
+        : `<div class="ma-empty-state">${this.h(source === "all" ? `custom.empty.used.${variant}` : "custom.empty.used.source", params)}</div>`;
+    } else if (this.activeCustomNodeTab === "unused") {
+      const rows = unusedPackages;
+      const sorted = this.sortRows(rows, this.sortState.customUnused.col, this.sortState.customUnused.dir);
+      const variant = this.usedThresholdEnabled ? "window" : "all";
+      const params = { count: bold(sorted.length), days: this.usedThresholdDays, source: this.t(`usage.source.${source}`) };
+      const summaryKey = source === "all" ? `custom.unused.summary.${variant}` : `custom.unused.summary.source.${variant}`;
+      content = sorted.length
+        ? `<div class="ma-summary">${this.h(summaryKey, params)} ${this.h("custom.unused.note")}${!trackingEnabled ? ` · ${this.h("custom.status.trackingPaused")}` : ""}</div>${this.renderDataTable("customUnused", sorted)}`
+        : `<div class="ma-empty-state">${this.h(source === "all" ? `custom.empty.unused.${variant}` : "custom.empty.unused.source", params)}</div>`;
+    } else if (this.activeCustomNodeTab === "disabled") {
+      const rows = packages.filter((item) => item.disabled === true);
+      const sorted = this.sortRows(rows, this.sortState.customDisabled.col, this.sortState.customDisabled.dir);
+      content = sorted.length
+        ? `<div class="ma-summary">${this.h("custom.disabled.summary", { count: bold(sorted.length) })}</div>${this.renderDataTable("customDisabled", sorted)}`
+        : `<div class="ma-empty-state">${this.h("custom.empty.disabled")}</div>`;
+    } else {
+      const workflowInfo = data.workflow_scan || {};
+      if (!scanEnabled) {
+        content = `<div class="ma-empty-state">${this.h("custom.workflow.scanDisabled")}</div>`;
+      } else if (workflowInfo.available === false) {
+        content = `<div class="ma-empty-state">${this.h("custom.workflow.scanUnavailable")}</div>`;
+      } else {
+        const sorted = this.sortRows(workflows, this.sortState.customWorkflow.col, this.sortState.customWorkflow.dir);
+        content = sorted.length
+          ? `<div class="ma-summary">${this.h("custom.workflow.summary", { count: bold(sorted.length) })}</div>${this.renderDataTable("customWorkflow", sorted)}`
+          : `<div class="ma-empty-state">${this.h("custom.empty.workflow")}</div>`;
+      }
+    }
+    return `${tabs}<div class="ma-section-content"><section class="ma-section">${content}</section></div>`;
   }
 
-  // Builds native select options for the custom appearance editor. Keep this
-  // helper on the dashboard class so Settings can render independently of the
-  // currently selected data tab.
   optionsHtml(options, value) {
-    return options.map((option) =>
-      `<option value="${escapeHtml(option.value)}" ${option.value === value ? "selected" : ""}>${escapeHtml(option.text)}</option>`,
-    ).join("");
-  }
-
-  settingOptions(id) {
-    const tr = this.tr;
-    const choices = {
-      [SETTING.language]: [
-        { value: LANGUAGE_AUTO, text: tr.t("settings.language.auto") },
-        ...LANGUAGES.map((language) => ({ value: language.code, text: language.label })),
-      ],
-      [SETTING.sizeUnit]: [
-        { value: "binary", text: tr.t("settings.sizeUnit.binary") },
-        { value: "decimal", text: tr.t("settings.sizeUnit.decimal") },
-      ],
-      [SETTING.density]: [
-        { value: "normal", text: tr.t("settings.density.normal") },
-        { value: "compact", text: tr.t("settings.density.compact") },
-      ],
-      [SETTING.dateFormat]: [
-        { value: "system", text: tr.t("settings.dateFormat.system") },
-        { value: "iso", text: tr.t("settings.dateFormat.iso") },
-      ],
-      [SETTING.defaultTab]: DATA_TABS.map((tab) => ({ value: tab, text: tr.t(`tab.${tab}`) })),
-    };
-    return choices[id] || [];
+    return (Array.isArray(options) ? options : []).map((option) => {
+      const optionValue = String(option.value ?? "");
+      const selected = optionValue === String(value) ? " selected" : "";
+      return `<option value="${escapeHtml(optionValue)}"${selected}>${escapeHtml(option.text ?? optionValue)}</option>`;
+    }).join("");
   }
 
   renderSettingSelect(id, titleKey, tooltipKey, value) {
-    const options = this.settingOptions(id).map((option) =>
-      `<option value="${escapeHtml(option.value)}" ${option.value === value ? "selected" : ""}>${escapeHtml(option.text)}</option>`,
-    ).join("");
+    let options = [];
+    if (id === SETTING.language) {
+      options = [
+        { value: LANGUAGE_AUTO, text: this.t("settings.language.auto") },
+        ...LANGUAGES.map((language) => ({ value: language.code, text: language.label })),
+      ];
+    } else if (id === SETTING.density) {
+      options = [
+        { value: "normal", text: this.t("settings.density.normal") },
+        { value: "compact", text: this.t("settings.density.compact") },
+      ];
+    } else if (id === SETTING.sizeUnit) {
+      options = [
+        { value: "binary", text: this.t("settings.sizeUnit.binary") },
+        { value: "decimal", text: this.t("settings.sizeUnit.decimal") },
+      ];
+    } else if (id === SETTING.dateFormat) {
+      options = [
+        { value: "system", text: this.t("settings.dateFormat.system") },
+        { value: "iso", text: this.t("settings.dateFormat.iso") },
+      ];
+    } else if (id === SETTING.defaultTab) {
+      options = DATA_TABS.map((tab) => ({ value: tab, text: this.t(`tab.${tab}`) }));
+    } else if (id === SETTING.defaultSection) {
+      options = [
+        { value: "models", text: this.t("section.models") },
+        { value: "customNodes", text: this.t("section.customNodes") },
+      ];
+    }
+
     return `
       <label class="ma-setting-row">
         <span class="ma-setting-copy">
           <span class="ma-setting-title">${this.h(titleKey)}</span>
           <span class="ma-setting-description">${this.h(tooltipKey)}</span>
         </span>
-        <select class="ma-select ma-settings-select" data-setting="${escapeHtml(id)}" aria-label="${this.h(titleKey)}">${options}</select>
+        <select class="ma-select ma-settings-select" data-setting="${escapeHtml(id)}" aria-label="${this.h(titleKey)}">
+          ${this.optionsHtml(options, value)}
+        </select>
       </label>
     `;
   }
@@ -770,22 +1146,25 @@ class ModelAnalyticsDashboard {
         <section class="ma-settings-section">
           <h3>${this.h("settings.group.general")}</h3>
           ${this.renderSettingSelect(SETTING.language, "settings.language.name", "settings.language.tooltip", language)}
-        </section>
-        <section class="ma-settings-section">
-          <h3>${this.h("settings.group.appearance")}</h3>
           ${this.renderAppearanceSettings()}
           ${this.renderSettingSelect(SETTING.density, "settings.density.name", "settings.density.tooltip", this.settings.density)}
+          ${this.renderSettingSelect(SETTING.dateFormat, "settings.dateFormat.name", "settings.dateFormat.tooltip", this.settings.dateFormat)}
+          ${this.renderSettingSelect(SETTING.defaultSection, "settings.defaultSection.name", "settings.defaultSection.tooltip", this.settings.defaultSection)}
         </section>
         <section class="ma-settings-section">
-          <h3>${this.h("settings.group.recency")}</h3>
+          <h3>${this.h("settings.group.models")}</h3>
+          <p class="ma-section-note">${this.h("settings.group.modelsNote")}</p>
           ${this.renderSettingToggle(SETTING.recencyEnabled, "settings.recency.enabled.name", "settings.recency.enabled.tooltip", this.usedThresholdEnabled)}
           ${this.renderSettingNumber(SETTING.recencyDays, "settings.recency.days.name", "settings.recency.days.tooltip", this.usedThresholdDays, !this.usedThresholdEnabled)}
+          ${this.renderSettingSelect(SETTING.sizeUnit, "settings.sizeUnit.name", "settings.sizeUnit.tooltip", this.settings.sizeUnit)}
+          ${this.renderSettingSelect(SETTING.defaultTab, "settings.defaultTab.name", "settings.defaultTab.tooltip", this.settings.defaultTab)}
         </section>
         <section class="ma-settings-section">
-          <h3>${this.h("settings.group.display")}</h3>
-          ${this.renderSettingSelect(SETTING.sizeUnit, "settings.sizeUnit.name", "settings.sizeUnit.tooltip", this.settings.sizeUnit)}
-          ${this.renderSettingSelect(SETTING.dateFormat, "settings.dateFormat.name", "settings.dateFormat.tooltip", this.settings.dateFormat)}
-          ${this.renderSettingSelect(SETTING.defaultTab, "settings.defaultTab.name", "settings.defaultTab.tooltip", this.settings.defaultTab)}
+          <h3>${this.h("settings.group.customNodes")}</h3>
+          <p class="ma-section-note">${this.h("settings.group.customNodesNote")}</p>
+          ${this.renderSettingToggle(SETTING.customNodeTrackingEnabled, "settings.customNodes.tracking.name", "settings.customNodes.tracking.tooltip", this.settings.customNodeTrackingEnabled)}
+          ${this.renderSettingToggle(SETTING.customNodeScanWorkflows, "settings.customNodes.scan.name", "settings.customNodes.scan.tooltip", this.settings.customNodeScanWorkflows)}
+          <p class="ma-section-note">${this.h("settings.customNodes.storageNote")}</p>
         </section>
         <p class="ma-settings-feedback" role="status" aria-live="polite"></p>
       </div>
@@ -826,6 +1205,14 @@ class ModelAnalyticsDashboard {
       if (id === SETTING.recencyEnabled || id === SETTING.recencyDays) {
         await this.onRecencyChanged();
         return;
+      }
+      if (id === SETTING.customNodeTrackingEnabled || id === SETTING.customNodeScanWorkflows) {
+        this.loadSettings();
+        const synchronized = await this.syncCustomNodeSettings();
+        if (!synchronized) feedback(this.t("settings.customNodes.syncError"));
+        this.customNodeData = null;
+        this.customNodeETag = null;
+        if (this.activeSection === "customNodes") await this.refreshCustomNodes();
       }
 
       // ComfyUI normally invokes the registered onChange callback from
@@ -980,6 +1367,12 @@ class ModelAnalyticsDashboard {
     return formatDate(iso, this.settings.dateFormat);
   }
 
+  packageNameCell(packageRow) {
+    const name = escapeHtml(packageRow.name || "—");
+    const path = escapeHtml(packageRow.relative_path || "");
+    return `<span class="ma-table-primary">${name}</span>${path ? `<span class="ma-table-secondary">${path}</span>` : ""}`;
+  }
+
   usedReasonCell(m) {
     const parts = (m.used_reason || "").split("+").filter(Boolean);
     const label = parts.length
@@ -1038,6 +1431,35 @@ class ModelAnalyticsDashboard {
         { id: "size_bytes", labelKey: "col.size", width: 17, minWidth: 72, sortable: false, render: (m) => this.size(m.size_bytes) },
         { id: "status", labelKey: "col.status", width: 17, minWidth: 78, sortable: false, render: () => `<span class="ma-badge ma-badge-used">${this.h("workflow.found")}</span>` },
       ],
+      customUsed: [
+        { id: "name", labelKey: "custom.col.package", width: 34, minWidth: 150, sortable: true, render: (p) => this.packageNameCell(p), title: (p) => p.relative_path || p.name },
+        { id: "extension_type", labelKey: "custom.col.type", width: 15, minWidth: 105, sortable: true, render: (p) => `<span class="ma-badge">${this.h(`custom.type.${p.extension_type || "other"}`)}</span>` },
+        { id: "registered_node_count", labelKey: "custom.col.nodeTypes", width: 13, minWidth: 82, sortable: true, render: (p) => String(Number(p.registered_node_count || 0)) },
+        { id: "execution_count", labelKey: "custom.col.executions", width: 16, minWidth: 90, sortable: true, render: (p) => String(Number(p.execution_count || 0)) },
+        { id: "workflow_count", labelKey: "custom.col.workflows", width: 14, minWidth: 82, sortable: true, render: (p) => String(Number(p.workflow_count || 0)) },
+        { id: "last_executed", labelKey: "custom.col.lastUsed", width: 23, minWidth: 120, sortable: true, render: (p) => escapeHtml(this.date(p.last_executed)) },
+      ],
+      customUnused: [
+        { id: "name", labelKey: "custom.col.package", width: 40, minWidth: 150, sortable: true, render: (p) => this.packageNameCell(p), title: (p) => p.relative_path || p.name },
+        { id: "extension_type", labelKey: "custom.col.type", width: 18, minWidth: 105, sortable: true, render: (p) => `<span class="ma-badge">${this.h(`custom.type.${p.extension_type || "other"}`)}</span>` },
+        { id: "registered_node_count", labelKey: "custom.col.nodeTypes", width: 16, minWidth: 82, sortable: true, render: (p) => String(Number(p.registered_node_count || 0)) },
+        { id: "workflow_count", labelKey: "custom.col.workflows", width: 17, minWidth: 82, sortable: true, render: (p) => String(Number(p.workflow_count || 0)) },
+        { id: "status", labelKey: "custom.col.registration", width: 27, minWidth: 120, sortable: false, render: (p) => `<span class="ma-badge${p.loaded ? " ma-badge-used" : ""}">${this.h(p.loaded ? "custom.status.registered" : "custom.status.notRegistered")}</span>` },
+      ],
+      customDisabled: [
+        { id: "name", labelKey: "custom.col.package", width: 34, minWidth: 150, sortable: true, render: (p) => this.packageNameCell(p), title: (p) => p.relative_path || p.name },
+        { id: "extension_type", labelKey: "custom.col.type", width: 15, minWidth: 105, sortable: true, render: (p) => `<span class="ma-badge">${this.h(`custom.type.${p.extension_type || "other"}`)}</span>` },
+        { id: "registered_node_count", labelKey: "custom.col.nodeTypes", width: 13, minWidth: 82, sortable: true, render: (p) => String(Number(p.registered_node_count || 0)) },
+        { id: "execution_count", labelKey: "custom.col.executions", width: 16, minWidth: 90, sortable: true, render: (p) => String(Number(p.execution_count || 0)) },
+        { id: "last_executed", labelKey: "custom.col.lastUsed", width: 20, minWidth: 112, sortable: true, render: (p) => escapeHtml(this.date(p.last_executed)) },
+        { id: "relative_path", labelKey: "custom.col.installPath", width: 17, minWidth: 125, sortable: true, render: (p) => escapeHtml(p.relative_path || "—"), title: (p) => p.relative_path || p.name },
+      ],
+      customWorkflow: [
+        { id: "name", labelKey: "custom.col.workflow", width: 38, minWidth: 150, sortable: true, render: (w) => escapeHtml(w.name), title: (w) => w.name },
+        { id: "package_names_text", labelKey: "custom.col.packages", width: 40, minWidth: 150, sortable: true, render: (w) => escapeHtml(w.package_names_text || "—"), title: (w) => w.package_names_text || "" },
+        { id: "package_count", labelKey: "custom.col.packageCount", width: 11, minWidth: 75, sortable: true, render: (w) => String(Number(w.package_count || 0)) },
+        { id: "node_type_count", labelKey: "custom.col.nodeTypes", width: 11, minWidth: 75, sortable: true, render: (w) => String(Number(w.node_type_count || 0)) },
+      ],
     };
     return definitions[tableKey] || [];
   }
@@ -1073,6 +1495,7 @@ class ModelAnalyticsDashboard {
     const layout = this.readTableLayout(tableKey, columns);
     const byId = new Map(columns.map((column) => [column.id, column]));
     const ordered = layout.order.map((id) => byId.get(id)).filter(Boolean);
+    const resizableIds = new Set(getResizableColumnIds(ordered.map((column) => column.id)));
     return `
       <div class="ma-table-scroll">
         <table class="ma-table" data-table="${tableKey}">
@@ -1080,7 +1503,7 @@ class ModelAnalyticsDashboard {
             ${ordered.map((column) => `<col data-ma-column="${column.id}" style="width:${layout.widths[column.id]}%">`).join("")}
           </colgroup>
           <thead><tr>
-            ${ordered.map((column) => this.headerCell(column.labelKey, column.id, tableKey, column.sortable)).join("")}
+            ${ordered.map((column) => this.headerCell(column.labelKey, column.id, tableKey, column.sortable, resizableIds.has(column.id))).join("")}
           </tr></thead>
           <tbody>
             ${rows.map((row) => `
@@ -1099,38 +1522,68 @@ class ModelAnalyticsDashboard {
 
   renderUsedTab() {
     const stats = calculateInventoryStats(this.data.models || []);
-    const used = stats.used;
+    const filtered = this.sourceFilteredInventory();
+    if (this.usageSourceFilter !== "all" && this.sourceUsageLoading && !this.sourceUsageData) {
+      return `<div class="ma-empty-state"><i class="pi pi-spin pi-spinner" aria-hidden="true"></i> ${this.h("usage.filter.loading")}</div>`;
+    }
+    if (this.usageSourceFilter !== "all" && this.sourceUsageError) {
+      return `<div class="ma-empty-state ma-source-filter-error">${this.h("usage.filter.error", { message: this.sourceUsageError })}</div>`;
+    }
+    const used = this.usageSourceFilter === "all" ? stats.used : (filtered?.used || []);
     const state = this.sortState.used;
     const sorted = this.sortRows(used, state.col, state.dir);
     const variant = this.usedThresholdEnabled ? "window" : "all";
     const days = this.usedThresholdDays;
 
     if (!sorted.length) {
-      return `<div class="ma-empty-state">${this.h(`used.empty.${variant}`, { days })}</div>`;
+      return this.usageSourceFilter === "all"
+        ? `<div class="ma-empty-state">${this.h(`used.empty.${variant}`, { days })}</div>`
+        : `<div class="ma-empty-state">${this.h("usage.noModels")}</div>`;
     }
 
-    return `
-      <div class="ma-summary">${this.h(`used.summary.${variant}`, { used: bold(used.length), total: bold(stats.used.length + stats.unused.length), days })}</div>
-      ${this.renderDataTable("used", sorted)}
-    `;
+    const summary = this.usageSourceFilter === "all"
+      ? this.h(`used.summary.${variant}`, { used: bold(used.length), total: bold(stats.used.length + stats.unused.length), days })
+      : this.h(`used.summary.source.${variant}`, {
+          used: bold(used.length),
+          total: bold(stats.used.length + stats.unused.length),
+          days,
+          source: this.t(`usage.source.${this.usageSourceFilter}`),
+        });
+
+    return `<div class="ma-summary">${summary}</div>${this.renderDataTable("used", sorted)}`;
   }
 
   renderUnusedTab() {
     const stats = calculateInventoryStats(this.data.models || []);
-    const unused = stats.unused;
+    const filtered = this.sourceFilteredInventory();
+    if (this.usageSourceFilter !== "all" && this.sourceUsageLoading && !this.sourceUsageData) {
+      return `<div class="ma-empty-state"><i class="pi pi-spin pi-spinner" aria-hidden="true"></i> ${this.h("usage.filter.loading")}</div>`;
+    }
+    if (this.usageSourceFilter !== "all" && this.sourceUsageError) {
+      return `<div class="ma-empty-state ma-source-filter-error">${this.h("usage.filter.error", { message: this.sourceUsageError })}</div>`;
+    }
+    const unused = this.usageSourceFilter === "all" ? stats.unused : (filtered?.unused || []);
     const state = this.sortState.unused;
     const sorted = this.sortRows(unused, state.col, state.dir);
-    const totalBytes = stats.unusedBytes;
+    const totalBytes = this.usageSourceFilter === "all"
+      ? stats.unusedBytes
+      : unused.reduce((sum, model) => sum + Math.max(0, Number(model.size_bytes) || 0), 0);
     const variant = this.usedThresholdEnabled ? "window" : "all";
 
     if (!sorted.length) {
       return `<div class="ma-empty-state">${this.h("unused.empty")}</div>`;
     }
 
-    return `
-      <div class="ma-summary">${this.h(`unused.summary.${variant}`, { count: bold(unused.length), size: bold(this.size(totalBytes)), days: this.usedThresholdDays })}</div>
-      ${this.renderDataTable("unused", sorted)}
-    `;
+    const summary = this.usageSourceFilter === "all"
+      ? this.h(`unused.summary.${variant}`, { count: bold(unused.length), size: bold(this.size(totalBytes)), days: this.usedThresholdDays })
+      : this.h(`unused.summary.source.${variant}`, {
+          count: bold(unused.length),
+          size: bold(this.size(totalBytes)),
+          days: this.usedThresholdDays,
+          source: this.t(`usage.source.${this.usageSourceFilter}`),
+        });
+
+    return `<div class="ma-summary">${summary}</div>${this.renderDataTable("unused", sorted)}`;
   }
 
   renderDisabledTab() {
@@ -1171,7 +1624,7 @@ class ModelAnalyticsDashboard {
     `;
   }
 
-  headerCell(labelKey, col, tableKey, sortable = true) {
+  headerCell(labelKey, col, tableKey, sortable = true, hasResizeHandle = true) {
     const state = sortable ? this.sortState[tableKey] : null;
     const arrow = state?.col === col ? (state.dir === 1 ? "▲" : "▼") : "";
     const sortAttr = sortable ? `data-col="${col}"` : "";
@@ -1182,7 +1635,7 @@ class ModelAnalyticsDashboard {
           <span class="ma-th-label">${this.h(labelKey)}</span>
           ${sortable ? `<span class="ma-sort-arrow">${arrow}</span>` : ""}
         </span>
-        <span class="ma-col-resizer" data-ma-resize="${col}" role="separator" aria-orientation="vertical" aria-label="Resize column"></span>
+        ${hasResizeHandle ? `<span class="ma-col-resizer" data-ma-resize="${col}" role="separator" aria-orientation="vertical" aria-label="Resize column"></span>` : ""}
       </th>
     `;
   }
@@ -1260,7 +1713,6 @@ class ModelAnalyticsDashboard {
           const width = table.getBoundingClientRect().width;
           if (!width) return;
           const startX = event.clientX;
-          const isLastColumn = layout.order[layout.order.length - 1] === columnId;
           let latest = layout;
           table.classList.add("ma-table-resizing");
           document.documentElement.classList.add("ma-column-resizing");
@@ -1268,8 +1720,7 @@ class ModelAnalyticsDashboard {
           const onMove = (moveEvent) => {
             moveEvent.preventDefault();
             const rawDelta = moveEvent.clientX - startX;
-            const delta = isLastColumn ? -rawDelta : rawDelta;
-            latest = resizeAdjacentColumns(layout, columns, columnId, delta, width);
+            latest = resizeAdjacentColumns(layout, columns, columnId, rawDelta, width);
             table.querySelectorAll("col[data-ma-column]").forEach((col) => {
               const nextWidth = latest.widths[col.dataset.maColumn];
               if (Number.isFinite(nextWidth)) col.style.width = `${nextWidth}%`;
@@ -1374,9 +1825,10 @@ function onRecencySettingChanged() {
 // ComfyUI settings dialog shows the new language the next time it opens.
 function buildSettingsDefinitions() {
   const { t } = createTranslator(resolveLanguage());
-  const section = "Model Analytics";
+  const section = "Analytics";
   const general = t("settings.group.general");
-  const display = t("settings.group.display");
+  const models = t("settings.group.models");
+  const customNodes = t("settings.group.customNodes");
   const recency = t("settings.group.recency");
 
   const combo = (id, group, nameKey, tipKey, options, defaultValue) => ({
@@ -1389,25 +1841,50 @@ function buildSettingsDefinitions() {
     defaultValue,
     onChange: onAnySettingChanged,
   });
+  const boolean = (id, group, nameKey, tipKey, defaultValue) => ({
+    id,
+    name: t(nameKey),
+    category: [section, group, t(nameKey)],
+    type: "boolean",
+    tooltip: t(tipKey),
+    defaultValue,
+    onChange: onAnySettingChanged,
+  });
 
   return [
     combo(
       SETTING.language, general, "settings.language.name", "settings.language.tooltip",
       [
         { text: t("settings.language.auto"), value: LANGUAGE_AUTO },
-        ...LANGUAGES.map((l) => ({ text: l.label, value: l.code })),
+        ...LANGUAGES.map((language) => ({ text: language.label, value: language.code })),
       ],
       LANGUAGE_AUTO,
     ),
-    {
-      id: SETTING.recencyEnabled,
-      name: t("settings.recency.enabled.name"),
-      category: [section, recency, t("settings.recency.enabled.name")],
-      type: "boolean",
-      tooltip: t("settings.recency.enabled.tooltip"),
-      defaultValue: true,
-      onChange: onRecencySettingChanged,
-    },
+    combo(
+      SETTING.defaultSection, general, "settings.defaultSection.name", "settings.defaultSection.tooltip",
+      [
+        { text: t("section.models"), value: "models" },
+        { text: t("section.customNodes"), value: "customNodes" },
+      ],
+      "models",
+    ),
+    combo(
+      SETTING.density, general, "settings.density.name", "settings.density.tooltip",
+      [
+        { text: t("settings.density.normal"), value: "normal" },
+        { text: t("settings.density.compact"), value: "compact" },
+      ],
+      "normal",
+    ),
+    combo(
+      SETTING.dateFormat, general, "settings.dateFormat.name", "settings.dateFormat.tooltip",
+      [
+        { text: t("settings.dateFormat.system"), value: "system" },
+        { text: t("settings.dateFormat.iso"), value: "iso" },
+      ],
+      "system",
+    ),
+    boolean(SETTING.recencyEnabled, recency, "settings.recency.enabled.name", "settings.recency.enabled.tooltip", true),
     {
       id: SETTING.recencyDays,
       name: t("settings.recency.days.name"),
@@ -1419,7 +1896,7 @@ function buildSettingsDefinitions() {
       onChange: onRecencySettingChanged,
     },
     combo(
-      SETTING.sizeUnit, display, "settings.sizeUnit.name", "settings.sizeUnit.tooltip",
+      SETTING.sizeUnit, models, "settings.sizeUnit.name", "settings.sizeUnit.tooltip",
       [
         { text: t("settings.sizeUnit.binary"), value: "binary" },
         { text: t("settings.sizeUnit.decimal"), value: "decimal" },
@@ -1427,52 +1904,45 @@ function buildSettingsDefinitions() {
       "binary",
     ),
     combo(
-      SETTING.density, display, "settings.density.name", "settings.density.tooltip",
-      [
-        { text: t("settings.density.normal"), value: "normal" },
-        { text: t("settings.density.compact"), value: "compact" },
-      ],
-      "normal",
-    ),
-    combo(
-      SETTING.dateFormat, display, "settings.dateFormat.name", "settings.dateFormat.tooltip",
-      [
-        { text: t("settings.dateFormat.system"), value: "system" },
-        { text: t("settings.dateFormat.iso"), value: "iso" },
-      ],
-      "system",
-    ),
-    combo(
-      SETTING.defaultTab, display, "settings.defaultTab.name", "settings.defaultTab.tooltip",
+      SETTING.defaultTab, models, "settings.defaultTab.name", "settings.defaultTab.tooltip",
       DATA_TABS.map((tab) => ({ text: t(`tab.${tab}`), value: tab })),
       "used",
     ),
+    boolean(SETTING.customNodeTrackingEnabled, customNodes, "settings.customNodes.tracking.name", "settings.customNodes.tracking.tooltip", true),
+    boolean(SETTING.customNodeScanWorkflows, customNodes, "settings.customNodes.scan.name", "settings.customNodes.scan.tooltip", true),
     {
       id: SETTING.starBannerDismissed,
-      name: "Model Analytics star banner dismissed",
+      name: "Analytics star banner dismissed",
       type: "hidden",
       defaultValue: false,
       onChange: onAnySettingChanged,
     },
     {
       id: SETTING.appearance,
-      name: "Model Analytics appearance preference",
+      name: "Analytics appearance preference",
       type: "hidden",
       defaultValue: "follow",
       onChange: onAnySettingChanged,
     },
     {
       id: SETTING.customAppearance,
-      name: "Model Analytics custom appearance values",
+      name: "Analytics custom appearance values",
       type: "hidden",
       defaultValue: "",
       onChange: onAnySettingChanged,
     },
     {
       id: SETTING.tableLayout,
-      name: "Model Analytics table layouts",
+      name: "Analytics table layouts",
       type: "hidden",
       defaultValue: "",
+    },
+    {
+      id: SETTING.usageSource,
+      name: "Model Analytics usage source filter",
+      type: "hidden",
+      defaultValue: "all",
+      onChange: onAnySettingChanged,
     },
   ];
 }
@@ -1568,7 +2038,7 @@ app.registerExtension({
   commands: [
     {
       id: "ModelAnalytics.Open",
-      label: "Model Analytics",
+      label: "Analytics",
       icon: "pi pi-chart-bar",
       function: openDashboard,
     },
@@ -1583,9 +2053,14 @@ app.registerExtension({
     if (legacyMenuInUse()) addLegacyMenuButton();
     const api = app.api;
     if (api?.addEventListener && !api.__modelAnalyticsRefreshBound) {
-      const refreshInventory = () => dashboard?.scheduleExecutionRefresh();
+      const refreshInventory = (eventName) => {
+        const section = dashboard?.activeSection;
+        if (section === "customNodes" && eventName !== "execution_success") return;
+        if (section === "models" && eventName !== "execution_start") return;
+        dashboard?.scheduleExecutionRefresh();
+      };
       for (const eventName of ["execution_start", "execution_success", "execution_error", "execution_interrupted"]) {
-        api.addEventListener(eventName, refreshInventory);
+        api.addEventListener(eventName, () => refreshInventory(eventName));
       }
       api.__modelAnalyticsRefreshBound = true;
     }

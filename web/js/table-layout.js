@@ -83,3 +83,14 @@ export function resizeAdjacentColumns(layout, columns, columnId, deltaPx, tableW
     },
   };
 }
+
+
+/**
+ * Return the columns that own a visible resize handle. A table with N columns
+ * has exactly N-1 boundaries, so the final visible column must not add a
+ * second handle on the same boundary from its left side.
+ */
+export function getResizableColumnIds(order) {
+  if (!Array.isArray(order) || order.length < 2) return [];
+  return order.slice(0, -1);
+}

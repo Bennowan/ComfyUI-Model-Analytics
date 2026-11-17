@@ -120,10 +120,20 @@
   margin: 0;
 }
 
+.ma-source-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ma-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* ---- Form controls ------------------------------------------------- */
 
 .ma-stale-input,
-.ma-select {
+.ma-select,
+.ma-source-filter-select {
   background: var(--ma-input-bg);
   color: var(--ma-input-fg);
   border: 1px solid var(--ma-border);
@@ -146,22 +156,35 @@
   cursor: pointer;
 }
 
+.ma-source-filter-select {
+  min-width: 132px;
+  max-width: 180px;
+  padding: 5px 28px 5px 8px;
+  margin: 0;
+  cursor: pointer;
+}
+
 .ma-stale-input:hover:not(:disabled),
-.ma-select:hover {
+.ma-select:hover,
+.ma-source-filter-select:hover {
   border-color: color-mix(in srgb, var(--ma-fg) 40%, var(--ma-border));
 }
 
 .ma-stale-input:focus-visible,
-.ma-select:focus-visible {
+.ma-select:focus-visible,
+.ma-source-filter-select:focus-visible {
   outline: none;
   border-color: var(--ma-accent);
   box-shadow: 0 0 0 3px var(--ma-accent-soft);
 }
 
-.ma-stale-input:disabled {
+.ma-stale-input:disabled,
+.ma-source-filter-select:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+.ma-source-filter-error { color: var(--ma-danger); }
 
 /* ---- Buttons ------------------------------------------------------- */
 
@@ -436,13 +459,6 @@ table.ma-table th:hover .ma-col-resizer::after,
   background: var(--ma-accent);
   opacity: 1;
 }
-table.ma-table th:last-child .ma-col-resizer {
-  right: auto;
-  left: 0;
-}
-table.ma-table th:last-child .ma-col-resizer::after {
-  left: 3px;
-}
 table.ma-table th.ma-column-drop-target {
   background: var(--ma-accent-soft);
   box-shadow: inset 2px 0 0 var(--ma-accent);
@@ -674,6 +690,16 @@ button.ma-actionbar-button:focus-visible {
   }
   .ma-header {
     padding: 12px 12px;
+  }
+  .ma-header-right {
+    width: 100%;
+  }
+  .ma-source-control {
+    flex: 1 1 auto;
+  }
+  .ma-source-filter-select {
+    min-width: 120px;
+    flex: 1 1 auto;
   }
   .ma-body {
     padding: 12px;
@@ -1000,3 +1026,59 @@ button.ma-actionbar-button:focus-visible {
   .ma-custom-row { align-items: stretch; flex-direction: column; gap: 7px; }
   .ma-custom-row .ma-input, .ma-custom-row .ma-select { width: 100%; min-width: 0; }
 }
+
+/* ---- Three-area Analytics navigation and Custom Node Analytics ------- */
+.ma-shared-usage-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+}
+.ma-shared-usage-controls[hidden] { display: none !important; }
+
+.ma-subtabs {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--ma-divider);
+}
+.ma-subtab-btn {
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ma-muted);
+  padding: 6px 11px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: var(--ma-radius-sm);
+  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+}
+.ma-subtab-btn:hover { color: var(--ma-fg); background: var(--ma-hover); }
+.ma-subtab-btn.active {
+  color: var(--ma-accent-text);
+  background: var(--ma-accent-soft);
+  border-color: color-mix(in srgb, var(--ma-accent) 38%, transparent);
+}
+.ma-subtab-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ma-accent-soft), 0 0 0 1px var(--ma-accent);
+}
+.ma-section-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding-top: 12px;
+}
+.ma-section-content > .ma-section { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.ma-section-content > .ma-section > .ma-table-scroll { flex: 1 1 auto; min-height: 0; }
+.ma-table-primary { display: block; overflow: hidden; color: var(--ma-fg); font-weight: 550; text-overflow: ellipsis; }
+.ma-table-secondary { display: block; overflow: hidden; margin-top: 2px; color: var(--ma-muted); font-size: 10.5px; text-overflow: ellipsis; }

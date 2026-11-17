@@ -4,6 +4,7 @@ import {
   normalizeTableLayout,
   reorderTableColumn,
   resizeAdjacentColumns,
+  getResizableColumnIds,
 } from '../web/js/table-layout.js';
 
 const columns = [
@@ -50,4 +51,12 @@ test('invalid resize inputs safely preserve the previous layout', () => {
   const layout = normalizeTableLayout(columns);
   assert.equal(resizeAdjacentColumns(layout, columns, 'name', 10, 0), layout);
   assert.equal(resizeAdjacentColumns(layout, columns, 'missing', 10, 1000), layout);
+});
+
+
+test('creates exactly one resize handle for each column boundary', () => {
+  assert.deepEqual(getResizableColumnIds(['name', 'size', 'last']), ['name', 'size']);
+  assert.deepEqual(getResizableColumnIds(['last', 'name', 'size']), ['last', 'name']);
+  assert.deepEqual(getResizableColumnIds(['only']), []);
+  assert.deepEqual(getResizableColumnIds([]), []);
 });
