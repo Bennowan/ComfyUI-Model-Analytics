@@ -2,7 +2,8 @@
 
 A local ComfyUI analytics extension for understanding model usage and discovering which installed Custom Node packages appear in started workflows or have completed successful node executions. A shared time-window and usage-source filter applies to both Models and Custom Nodes. Model files, workflows and installed packages are never modified by the analytics features.
 
-[Demo Video](https://github.com/user-attachments/assets/7dfe80a5-28de-42bc-8989-bc9301c4389b)
+[Demo Video](https://github.com/user-attachments/assets/7b61a5cc-5f34-4b0c-939c-dd8b7401bfe6)
+
 
 <table>
   <tr>
