@@ -55,4 +55,15 @@ If this saved you some disk-space headaches, a ⭐ on GitHub helps other people 
 
 ## License
 
-Non-commercial. Check the LICENSE file for details.
+ComfyUI-Model-Analytics is licensed under the **Bennowan Community Non-Commercial License (BCNCL) v1.0**.
+
+- **Non-commercial use only:** Commercial use, monetization, paid distribution, and other forms of financial gain are prohibited.
+- **Attribution required:** Original copyright notices and credits must be preserved.
+- **No independent mirrors:** Unchanged or substantially identical copies may not be published or maintained as separate projects.
+- **Community contributions welcome:** Development forks and contributions to the official repository are permitted under the license terms.
+
+The official project is maintained by **Bennowan**:
+
+[github.com/Bennowan/ComfyUI-Model-Analytics](https://github.com/Bennowan/ComfyUI-Model-Analytics)
+
+See the [LICENSE](./LICENSE) file for the complete terms.
